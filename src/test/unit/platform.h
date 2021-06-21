@@ -17,21 +17,31 @@
 
 #pragma once
 
+#include <stdio.h>
+#include <stdint.h>
+
 #define USE_PARAMETER_GROUPS
 
 #define U_ID_0 0
 #define U_ID_1 1
 #define U_ID_2 2
 
-#define MAX_PROFILE_COUNT 3
-#define MAG
-#define BARO
-#define GPS
+#define NOINLINE
+#define FAST_CODE
+#define FAST_CODE_NOINLINE
+#define FAST_DATA_ZERO_INIT
+#define FAST_DATA
+
+#define PID_PROFILE_COUNT 3
+#define CONTROL_RATE_PROFILE_COUNT  6
+#define USE_MAG
+#define USE_BARO
+#define USE_GPS
 #define USE_DASHBOARD
-#define TELEMETRY
-#define LED_STRIP
+#define USE_TELEMETRY
+#define USE_LED_STRIP
 #define USE_SERVOS
-#define TRANSPONDER
+#define USE_TRANSPONDER
 
 typedef enum
 {
@@ -85,7 +95,23 @@ typedef struct
     void* test;
 } USART_TypeDef;
 
+typedef struct
+{
+    void *test;
+} I2C_TypeDef;
+
+typedef struct
+{
+    void* test;
+} ADC_TypeDef;
+
 #define WS2811_DMA_TC_FLAG (void *)1
 #define WS2811_DMA_HANDLER_IDENTIFER 0
+#define NVIC_PriorityGroup_2 0x500
+
+#define MCU_TYPE_ID   99
+#define MCU_TYPE_NAME "UNIT_TEST"
 
 #include "target.h"
+
+#include "target/common_defaults_post.h"

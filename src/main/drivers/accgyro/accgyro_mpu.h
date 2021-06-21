@@ -1,34 +1,51 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
+#include "drivers/bus.h"
 #include "drivers/exti.h"
 #include "drivers/sensor.h"
 
 //#define DEBUG_MPU_DATA_READY_INTERRUPT
 
-#if defined(USE_GYRO_SPI_MPU6500) || defined(USE_GYRO_SPI_MPU6000) ||  defined(USE_GYRO_SPI_MPU9250) || defined(USE_GYRO_SPI_ICM20689)
+#if defined(USE_GYRO_SPI_MPU6500) || defined(USE_GYRO_SPI_MPU6000) ||  defined(USE_GYRO_SPI_MPU9250) || defined(USE_GYRO_SPI_ICM20649) \
+ || defined(USE_GYRO_SPI_ICM20689)
 #define GYRO_USES_SPI
 #endif
 
 // MPU6050
 #define MPU_RA_WHO_AM_I         0x75
 #define MPU_RA_WHO_AM_I_LEGACY  0x00
+
+#define MPUx0x0_WHO_AM_I_CONST              (0x68) // MPU3050, 6000 and 6050
+#define MPU6000_WHO_AM_I_CONST              (0x68)
+#define MPU6500_WHO_AM_I_CONST              (0x70)
+#define MPU9250_WHO_AM_I_CONST              (0x71)
+#define MPU9255_WHO_AM_I_CONST              (0x73)
+#define ICM20601_WHO_AM_I_CONST             (0xAC)
+#define ICM20602_WHO_AM_I_CONST             (0x12)
+#define ICM20608G_WHO_AM_I_CONST            (0xAF)
+#define ICM20649_WHO_AM_I_CONST             (0xE1)
+#define ICM20689_WHO_AM_I_CONST             (0x98)
+#define ICM42605_WHO_AM_I_CONST             (0x42)
 
 // RA = Register Address
 
@@ -124,21 +141,6 @@
 // RF = Register Flag
 #define MPU_RF_DATA_RDY_EN (1 << 0)
 
-typedef bool (*mpuReadRegisterFnPtr)(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t* data);
-typedef bool (*mpuWriteRegisterFnPtr)(const busDevice_t *bus, uint8_t reg, uint8_t data);
-typedef void(*mpuResetFnPtr)(void);
-
-extern mpuResetFnPtr mpuResetFn;
-
-typedef struct mpuConfiguration_s {
-    mpuReadRegisterFnPtr readFn;
-    mpuWriteRegisterFnPtr writeFn;
-    mpuReadRegisterFnPtr slowreadFn;
-    mpuWriteRegisterFnPtr verifywriteFn;
-    mpuResetFnPtr resetFn;
-    uint8_t gyroReadXRegister; // Y and Z must registers follow this, 2 words each
-} mpuConfiguration_t;
-
 enum gyro_fsr_e {
     INV_FSR_250DPS = 0,
     INV_FSR_500DPS,
@@ -147,10 +149,12 @@ enum gyro_fsr_e {
     NUM_GYRO_FSR
 };
 
-enum fchoice_b {
-    FCB_DISABLED = 0,
-    FCB_8800_32,
-    FCB_3600_32
+enum icm_high_range_gyro_fsr_e {
+    ICM_HIGH_RANGE_FSR_500DPS = 0,
+    ICM_HIGH_RANGE_FSR_1000DPS,
+    ICM_HIGH_RANGE_FSR_2000DPS,
+    ICM_HIGH_RANGE_FSR_4000DPS,
+    NUM_ICM_HIGH_RANGE_GYRO_FSR
 };
 
 enum clock_sel_e {
@@ -167,6 +171,21 @@ enum accel_fsr_e {
     NUM_ACCEL_FSR
 };
 
+enum icm_high_range_accel_fsr_e {
+    ICM_HIGH_RANGE_FSR_4G = 0,
+    ICM_HIGH_RANGE_FSR_8G,
+    ICM_HIGH_RANGE_FSR_16G,
+    ICM_HIGH_RANGE_FSR_32G,
+    NUM_ICM_HIGH_RANGE_ACCEL_FSR
+};
+
+typedef enum {
+    GYRO_OVERFLOW_NONE = 0x00,
+    GYRO_OVERFLOW_X = 0x01,
+    GYRO_OVERFLOW_Y = 0x02,
+    GYRO_OVERFLOW_Z = 0x04
+} gyroOverflow_e;
+
 typedef enum {
     MPU_NONE,
     MPU_3050,
@@ -178,8 +197,13 @@ typedef enum {
     ICM_20601_SPI,
     ICM_20602_SPI,
     ICM_20608_SPI,
+    ICM_20649_SPI,
     ICM_20689_SPI,
+    ICM_42605_SPI,
     BMI_160_SPI,
+    BMI_270_SPI,
+    LSM6DSO_SPI,
+    L3GD20_SPI,
 } mpuSensor_e;
 
 typedef enum {
@@ -192,15 +216,15 @@ typedef struct mpuDetectionResult_s {
     mpu6050Resolution_e resolution;
 } mpuDetectionResult_t;
 
-bool mpuReadRegisterI2C(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t* data);
-bool mpuWriteRegisterI2C(const busDevice_t *bus, uint8_t reg, uint8_t data);
-
 struct gyroDev_s;
+struct gyroDeviceConfig_s;
 void mpuGyroInit(struct gyroDev_s *gyro);
+bool mpuGyroRead(struct gyroDev_s *gyro);
+bool mpuGyroReadSPI(struct gyroDev_s *gyro);
+void mpuPreInit(const struct gyroDeviceConfig_s *config);
+bool mpuDetect(struct gyroDev_s *gyro, const struct gyroDeviceConfig_s *config);
+uint8_t mpuGyroDLPF(struct gyroDev_s *gyro);
+uint8_t mpuGyroReadRegister(const busDevice_t *bus, uint8_t reg);
+
 struct accDev_s;
 bool mpuAccRead(struct accDev_s *acc);
-bool mpuGyroRead(struct gyroDev_s *gyro);
-void mpuDetect(struct gyroDev_s *gyro);
-bool mpuCheckDataReady(struct gyroDev_s *gyro);
-void mpuGyroSetIsrUpdate(struct gyroDev_s *gyro, sensorGyroUpdateFuncPtr updateFn);
-

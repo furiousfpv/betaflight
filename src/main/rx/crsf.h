@@ -1,66 +1,70 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
-#define CRSF_BAUDRATE           420000
+#include "rx/crsf_protocol.h"
+
+
 #define CRSF_PORT_OPTIONS       (SERIAL_STOPBITS_1 | SERIAL_PARITY_NO)
 #define CRSF_PORT_MODE          MODE_RXTX
 
 #define CRSF_MAX_CHANNEL        16
+#define CRSFV3_MAX_CHANNEL      24
 
+#define CRSF_SUBSET_RC_STARTING_CHANNEL_BITS        5
+#define CRSF_SUBSET_RC_STARTING_CHANNEL_MASK        0x1F
+#define CRSF_SUBSET_RC_RES_CONFIGURATION_BITS       2
+#define CRSF_SUBSET_RC_RES_CONFIGURATION_MASK       0x03
+#define CRSF_SUBSET_RC_RESERVED_CONFIGURATION_BITS  1
+
+#define CRSF_RC_CHANNEL_SCALE_LEGACY                0.62477120195241f
+#define CRSF_SUBSET_RC_RES_CONF_10B                 0
+#define CRSF_SUBSET_RC_RES_BITS_10B                 10
+#define CRSF_SUBSET_RC_RES_MASK_10B                 0x03FF
+#define CRSF_SUBSET_RC_CHANNEL_SCALE_10B            1.0f
+#define CRSF_SUBSET_RC_RES_CONF_11B                 1
+#define CRSF_SUBSET_RC_RES_BITS_11B                 11
+#define CRSF_SUBSET_RC_RES_MASK_11B                 0x07FF
+#define CRSF_SUBSET_RC_CHANNEL_SCALE_11B            0.5f
+#define CRSF_SUBSET_RC_RES_CONF_12B                 2
+#define CRSF_SUBSET_RC_RES_BITS_12B                 12
+#define CRSF_SUBSET_RC_RES_MASK_12B                 0x0FFF
+#define CRSF_SUBSET_RC_CHANNEL_SCALE_12B            0.25f
+#define CRSF_SUBSET_RC_RES_CONF_13B                 3
+#define CRSF_SUBSET_RC_RES_BITS_13B                 13
+#define CRSF_SUBSET_RC_RES_MASK_13B                 0x1FFF
+#define CRSF_SUBSET_RC_CHANNEL_SCALE_13B            0.125f
+
+#define CRSF_RSSI_MIN (-130)
+#define CRSF_RSSI_MAX 0
+#define CRSF_SNR_MIN (-30)
+#define CRSF_SNR_MAX 20
+
+/* For documentation purposes
 typedef enum {
-    CRSF_FRAMETYPE_GPS = 0x02,
-    CRSF_FRAMETYPE_BATTERY_SENSOR = 0x08,
-    CRSF_FRAMETYPE_LINK_STATISTICS = 0x14,
-    CRSF_FRAMETYPE_RC_CHANNELS_PACKED = 0x16,
-    CRSF_FRAMETYPE_ATTITUDE = 0x1E,
-    CRSF_FRAMETYPE_FLIGHT_MODE = 0x21
-} crsfFrameTypes_e;
-
-enum {
-    CRSF_FRAME_GPS_PAYLOAD_SIZE = 15,
-    CRSF_FRAME_BATTERY_SENSOR_PAYLOAD_SIZE = 8,
-    CRSF_FRAME_LINK_STATISTICS_PAYLOAD_SIZE = 10,
-    CRSF_FRAME_RC_CHANNELS_PAYLOAD_SIZE = 22, // 11 bits per channel * 16 channels = 22 bytes.
-    CRSF_FRAME_ATTITUDE_PAYLOAD_SIZE = 6,
-    CRSF_FRAME_LENGTH_ADDRESS = 1, // length of ADDRESS field
-    CRSF_FRAME_LENGTH_FRAMELENGTH = 1, // length of FRAMELENGTH field
-    CRSF_FRAME_LENGTH_TYPE = 1, // length of TYPE field
-    CRSF_FRAME_LENGTH_CRC = 1, // length of CRC field
-    CRSF_FRAME_LENGTH_TYPE_CRC = 2 // length of TYPE and CRC fields combined
-};
-
-enum {
-    CRSF_ADDRESS_BROADCAST = 0x00,
-    CRSF_ADDRESS_TBS_CORE_PNP_PRO = 0x8,
-    CRSF_ADDRESS_RESERVED1 = 0x8A,
-    CRSF_ADDRESS_CURRENT_SENSOR = 0xC0,
-    CRSF_ADDRESS_TBS_BLACKBOX = 0xC4,
-    CRSF_ADDRESS_COLIBRI_RACE_FC = 0xC8,
-    CRSF_ADDRESS_RESERVED2 = 0xCA,
-    CRSF_ADDRESS_RACE_TAG = 0xCC,
-    CRSF_ADDRESS_RADIO_TRANSMITTER = 0xEA,
-    CRSF_ADDRESS_CRSF_RECEIVER = 0xEC,
-    CRSF_ADDRESS_CRSF_TRANSMITTER = 0xEE
-};
-
-#define CRSF_PAYLOAD_SIZE_MAX   32 // !!TODO needs checking
-#define CRSF_FRAME_SIZE_MAX     (CRSF_PAYLOAD_SIZE_MAX + 4)
+    CRSF_RF_MODE_4_FPS = 0,
+    CRSF_RF_MODE_50_FPS,
+    CRSF_RF_MODE_150_FPS,
+} crsfRfMode_e;
+*/
 
 typedef struct crsfFrameDef_s {
     uint8_t deviceAddress;
@@ -74,11 +78,11 @@ typedef union crsfFrame_u {
     crsfFrameDef_t frame;
 } crsfFrame_t;
 
-
 void crsfRxWriteTelemetryData(const void *data, int len);
 void crsfRxSendTelemetryData(void);
 
 struct rxConfig_s;
-struct rxRuntimeConfig_s;
-bool crsfRxInit(const struct rxConfig_s *initialRxConfig, struct rxRuntimeConfig_s *rxRuntimeConfig);
+struct rxRuntimeState_s;
+bool crsfRxInit(const struct rxConfig_s *initialRxConfig, struct rxRuntimeState_s *rxRuntimeState);
+void crsfRxUpdateBaudrate(uint32_t baudrate);
 bool crsfRxIsActive(void);

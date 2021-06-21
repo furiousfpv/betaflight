@@ -26,6 +26,9 @@
  */
 
 /* Includes ------------------------------------------------------------------*/
+
+#include "platform.h"
+
 #include "usb_lib.h"
 #include "usb_prop.h"
 #include "usb_pwr.h"
@@ -193,7 +196,7 @@ void USB_Istr(void)
                 _SetCNTR(wCNTR);
 
                 /*poll for RESET flag in ISTR*/
-                while((_GetISTR()&ISTR_RESET) == 0);
+                while ((_GetISTR()&ISTR_RESET) == 0);
                 /* clear RESET flag in ISTR */
                 _SetISTR((uint16_t)CLR_RESET);
 

@@ -1,13 +1,33 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
 #pragma once
 
-#if defined(VTX_TRAMP) && defined(VTX_CONTROL)
+#include <stdint.h>
 
-bool vtxTrampInit();
+#define VTX_TRAMP_POWER_COUNT 5
 
-#ifdef CMS
-#include "cms/cms.h"
-#include "cms/cms_types.h"
-extern CMS_Menu cmsx_menuVtxTramp;
-#endif
+#define VTX_TRAMP_MIN_FREQUENCY_MHZ 5000             //min freq in MHz
+#define VTX_TRAMP_MAX_FREQUENCY_MHZ 5999             //max freq in MHz
 
-#endif
+bool vtxTrampInit(void);
+
+uint16_t vtxTrampGetCurrentActualPower();
+uint16_t vtxTrampGetCurrentTemp();

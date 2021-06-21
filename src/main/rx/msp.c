@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -24,15 +27,18 @@
 
 #include "common/utils.h"
 
+#include "drivers/io.h"
+#include "pg/rx.h"
 #include "rx/rx.h"
 #include "rx/msp.h"
+
 
 static uint16_t mspFrame[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 static bool rxMspFrameDone = false;
 
-static uint16_t rxMspReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfigPtr, uint8_t chan)
+float rxMspReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
 {
-    UNUSED(rxRuntimeConfigPtr);
+    UNUSED(rxRuntimeState);
     return mspFrame[chan];
 }
 
@@ -53,8 +59,10 @@ void rxMspFrameReceive(uint16_t *frame, int channelCount)
     rxMspFrameDone = true;
 }
 
-static uint8_t rxMspFrameStatus(void)
+static uint8_t rxMspFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
+    UNUSED(rxRuntimeState);
+
     if (!rxMspFrameDone) {
         return RX_FRAME_PENDING;
     }
@@ -63,14 +71,14 @@ static uint8_t rxMspFrameStatus(void)
     return RX_FRAME_COMPLETE;
 }
 
-void rxMspInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+void rxMspInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxConfig);
 
-    rxRuntimeConfig->channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT;
-    rxRuntimeConfig->rxRefreshRate = 20000;
+    rxRuntimeState->channelCount = MAX_SUPPORTED_RC_CHANNEL_COUNT;
+    rxRuntimeState->rxRefreshRate = 20000;
 
-    rxRuntimeConfig->rcReadRawFn = rxMspReadRawRC;
-    rxRuntimeConfig->rcFrameStatusFn = rxMspFrameStatus;
+    rxRuntimeState->rcReadRawFn = rxMspReadRawRC;
+    rxRuntimeState->rcFrameStatusFn = rxMspFrameStatus;
 }
 #endif

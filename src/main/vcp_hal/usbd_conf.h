@@ -50,20 +50,39 @@
 #define __USBD_CONF_H
 
 /* Includes ------------------------------------------------------------------*/
+#include "platform.h"      // Required for inclusion of stm32Yxx_hal.h below within USB device library code
+#include "common/maths.h"  // Required for MIN & MAX within USB device library code
+
+#if defined(STM32F7)
 #include "stm32f7xx_hal.h"
+#elif defined(STM32H7)
+#include "stm32h7xx_hal.h"
+#elif defined(STM32G4)
+#include "stm32g4xx_hal.h"
+#else
+#error Unknown MCU
+#endif
+
+#ifdef STM32G4
+#define USB_OTG_MAX_EP0_SIZE USB_MAX_EP0_SIZE
+#endif
+
+#if (USBD_DEBUG_LEVEL > 0)
 #include <stdio.h>
+#endif
 #include <stdlib.h>
 #include <string.h>
 
 /* Exported types ------------------------------------------------------------*/
 /* Exported constants --------------------------------------------------------*/
 /* Common Config */
-#define USBD_MAX_NUM_INTERFACES               0
+#define USBD_MAX_NUM_INTERFACES               3
 #define USBD_MAX_NUM_CONFIGURATION            1
 #define USBD_MAX_STR_DESC_SIZ                 0x100
 #define USBD_SUPPORT_USER_STRING              0
 #define USBD_SELF_POWERED                     1
 #define USBD_DEBUG_LEVEL                      0
+#define MSC_MEDIA_PACKET                      512U
 #define USE_USB_FS
 
 /* Exported macro ------------------------------------------------------------*/

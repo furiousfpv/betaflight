@@ -1,31 +1,38 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
 #include "drivers/io.h"
+#include "drivers/io_types.h"
+#include "drivers/resource.h"
 
-typedef enum portMode_t {
+#include "pg/pg.h"
+
+typedef enum {
     MODE_RX = 1 << 0,
     MODE_TX = 1 << 1,
     MODE_RXTX = MODE_RX | MODE_TX
-} portMode_t;
+} portMode_e;
 
-typedef enum portOptions_t {
+typedef enum {
     SERIAL_NOT_INVERTED  = 0 << 0,
     SERIAL_INVERTED      = 1 << 0,
     SERIAL_STOPBITS_1    = 0 << 1,
@@ -42,19 +49,25 @@ typedef enum portOptions_t {
      * To ensure the first start bit to be sent, prepend a zero byte (0x00)
      * to actual data bytes.
      */
-    SERIAL_BIDIR_OD      = 0 << 4,
-    SERIAL_BIDIR_PP      = 1 << 4
-} portOptions_t;
+    SERIAL_BIDIR_OD        = 0 << 4,
+    SERIAL_BIDIR_PP        = 1 << 4,
+    SERIAL_BIDIR_NOPULL    = 1 << 5, // disable pulls in BIDIR RX mode
+    SERIAL_BIDIR_PP_PD     = 1 << 6, // PP mode, normall inverted, but with PullDowns, to fix SA after bidir issue fixed (#10220)
+} portOptions_e;
 
-typedef void (*serialReceiveCallbackPtr)(uint16_t data);   // used by serial drivers to return frames to app
+// Define known line control states which may be passed up by underlying serial driver callback
+#define CTRL_LINE_STATE_DTR (1 << 0)
+#define CTRL_LINE_STATE_RTS (1 << 1)
+
+typedef void (*serialReceiveCallbackPtr)(uint16_t data, void *rxCallbackData);   // used by serial drivers to return frames to app
+typedef void (*serialIdleCallbackPtr)();
 
 typedef struct serialPort_s {
 
     const struct serialPortVTable *vTable;
 
-    uint8_t identifier;
-    portMode_t mode;
-    portOptions_t options;
+    portMode_e mode;
+    portOptions_e options;
 
     uint32_t baudRate;
 
@@ -68,6 +81,11 @@ typedef struct serialPort_s {
     uint32_t txBufferTail;
 
     serialReceiveCallbackPtr rxCallback;
+    void *rxCallbackData;
+
+    serialIdleCallbackPtr idleCallback;
+
+    uint8_t identifier;
 } serialPort_t;
 
 #if defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL2)
@@ -83,7 +101,10 @@ typedef struct serialPort_s {
 typedef struct serialPinConfig_s {
     ioTag_t ioTagTx[SERIAL_PORT_MAX_INDEX];
     ioTag_t ioTagRx[SERIAL_PORT_MAX_INDEX];
+    ioTag_t ioTagInverter[SERIAL_PORT_MAX_INDEX];
 } serialPinConfig_t;
+
+PG_DECLARE(serialPinConfig_t, serialPinConfig);
 
 struct serialPortVTable {
     void (*serialWrite)(serialPort_t *instance, uint8_t ch);
@@ -98,7 +119,9 @@ struct serialPortVTable {
 
     bool (*isSerialTransmitBufferEmpty)(const serialPort_t *instance);
 
-    void (*setMode)(serialPort_t *instance, portMode_t mode);
+    void (*setMode)(serialPort_t *instance, portMode_e mode);
+    void (*setCtrlLineStateCb)(serialPort_t *instance, void (*cb)(void *instance, uint16_t ctrlLineState), void *context);
+    void (*setBaudRateCb)(serialPort_t *instance, void (*cb)(serialPort_t *context, uint32_t baud), serialPort_t *context);
 
     void (*writeBuf)(serialPort_t *instance, const void *data, int count);
     // Optional functions used to buffer large writes.
@@ -112,7 +135,9 @@ uint32_t serialTxBytesFree(const serialPort_t *instance);
 void serialWriteBuf(serialPort_t *instance, const uint8_t *data, int count);
 uint8_t serialRead(serialPort_t *instance);
 void serialSetBaudRate(serialPort_t *instance, uint32_t baudRate);
-void serialSetMode(serialPort_t *instance, portMode_t mode);
+void serialSetMode(serialPort_t *instance, portMode_e mode);
+void serialSetCtrlLineStateCb(serialPort_t *instance, void (*cb)(void *context, uint16_t ctrlLineState), void *context);
+void serialSetBaudRateCb(serialPort_t *instance, void (*cb)(serialPort_t *context, uint32_t baud), serialPort_t *context);
 bool isSerialTransmitBufferEmpty(const serialPort_t *instance);
 void serialPrint(serialPort_t *instance, const char *str);
 uint32_t serialGetBaudRate(serialPort_t *instance);

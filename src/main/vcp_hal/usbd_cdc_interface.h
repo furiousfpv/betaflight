@@ -50,20 +50,37 @@
 #define __USBD_CDC_IF_H
 
 /* Includes ------------------------------------------------------------------*/
+
 #include "usbd_cdc.h"
-#include "stm32f7xx_hal.h"
 #include "usbd_core.h"
 #include "usbd_desc.h"
 
 /* Definition for TIMx clock resources */
 #define TIMusb                             TIM7
+#if defined(STM32G4)
+#define TIMx_IRQn                        TIM7_DAC_IRQn
+#define TIMx_IRQHandler                  TIM7_DAC_IRQHandler
+#else
 #define TIMx_IRQn                        TIM7_IRQn
 #define TIMx_IRQHandler                  TIM7_IRQHandler
+#endif
 #define TIMx_CLK_ENABLE                  __HAL_RCC_TIM7_CLK_ENABLE
 
 /* Periodically, the state of the buffer "UserTxBuffer" is checked.
    The period depends on CDC_POLLING_INTERVAL */
-#define CDC_POLLING_INTERVAL             10 /* in ms. The max is 65 and the min is 1 */
+#define CDC_POLLING_INTERVAL             5 /* in ms. The max is 65 and the min is 1 */
+
+/* Exported typef ------------------------------------------------------------*/
+/* The following structures groups all needed parameters to be configured for the
+   ComPort. These parameters can modified on the fly by the host through CDC class
+   command class requests. */
+typedef struct __attribute__ ((packed))
+{
+  uint32_t bitrate;
+  uint8_t  format;
+  uint8_t  paritytype;
+  uint8_t  datatype;
+} LINE_CODING;
 
 extern USBD_CDC_ItfTypeDef  USBD_CDC_fops;
 
@@ -74,6 +91,8 @@ uint32_t CDC_Receive_BytesAvailable(void);
 uint8_t usbIsConfigured(void);
 uint8_t usbIsConnected(void);
 uint32_t CDC_BaudRate(void);
+void CDC_SetCtrlLineStateCb(void (*cb)(void *context, uint16_t ctrlLineState), void *context);
+void CDC_SetBaudRateCb(void (*cb)(void *context, uint32_t baud), void *context);
 
 /* Exported macro ------------------------------------------------------------*/
 /* Exported functions ------------------------------------------------------- */

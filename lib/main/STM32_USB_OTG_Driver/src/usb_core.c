@@ -180,7 +180,7 @@ USB_OTG_STS USB_OTG_WritePacket(USB_OTG_CORE_HANDLE *pdev,
     fifo = pdev->regs.DFIFO[ch_ep_num];
     for (i = 0; i < count32b; i++)
     {
-      USB_OTG_WRITE_REG32( fifo, *((__packed uint32_t *)src) );
+      USB_OTG_WRITE_REG32( fifo, *((uint32_t *)src) );
       src+=4;
     }
   }
@@ -206,7 +206,7 @@ void *USB_OTG_ReadPacket(USB_OTG_CORE_HANDLE *pdev,
   
   for( i = 0; i < count32b; i++)
   {
-    *(__packed uint32_t *)dest = USB_OTG_READ_REG32(fifo);
+    *(uint32_t *)dest = USB_OTG_READ_REG32(fifo);
     dest += 4 ;
   }
   return ((void *)dest);
@@ -318,6 +318,7 @@ USB_OTG_STS USB_OTG_SelectCore(USB_OTG_CORE_HANDLE *pdev,
   return status;
 }
 
+#include "build/debug.h"
 
 /**
 * @brief  USB_OTG_CoreInit
@@ -391,13 +392,10 @@ USB_OTG_STS USB_OTG_CoreInit(USB_OTG_CORE_HANDLE *pdev)
     /* Deactivate the power down*/
     gccfg.d32 = 0;
     gccfg.b.pwdn = 1;
-    gccfg.b.vbussensingA = 1 ;
-    gccfg.b.vbussensingB = 1 ; 
-   
-#ifndef VBUS_SENSING_ENABLED
+
+    // XXX Betaflight mod; disabled VBUS sensing features completely, including Sense A and B.
     gccfg.b.disablevbussensing = 1; 
-#endif    
-    
+
     if(pdev->cfg.Sof_output)
     {
       gccfg.b.sofouten = 1;  

@@ -1,48 +1,49 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "platform.h"
+
+#include "drivers/bus.h"
 #include "drivers/bus_i2c.h"
 #include "drivers/bus_spi.h"
+
 #include "hardware_revision.h"
+
+#include "io/serial.h"
+
+#include "pg/bus_i2c.h"
+#include "pg/bus_spi.h"
+
+#include "sensors/initialisation.h"
 
 void targetBusInit(void)
 {
-    #ifdef USE_SPI
-    #ifdef USE_SPI_DEVICE_1
-        spiInit(SPIDEV_1);
-    #endif
-    #ifdef USE_SPI_DEVICE_2
-        spiInit(SPIDEV_2);
-    #endif
-    #ifdef USE_SPI_DEVICE_3
-        if (hardwareRevision == AFF3_REV_2) {
-            spiInit(SPIDEV_3);
-        }
-    #endif
-    #ifdef USE_SPI_DEVICE_4
-        spiInit(SPIDEV_4);
-    #endif
-    #endif
-
-    #ifdef USE_I2C
-        i2cInit(I2C_DEVICE);
-    #endif
+    if (hardwareRevision == AFF3_REV_2) {
+        spiPinConfigure(spiPinConfig(0));
+        sensorsPreInit();
+        spiPreinit();
+        spiInit(SPIDEV_3);
+    }
+    i2cHardwareConfigure(i2cConfig(0));
+    i2cInit(I2CDEV_2);
 }

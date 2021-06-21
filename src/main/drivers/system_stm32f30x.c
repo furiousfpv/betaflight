@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -20,11 +23,18 @@
 
 #include "platform.h"
 
-#include "drivers/gpio.h"
 #include "drivers/nvic.h"
 #include "drivers/system.h"
 
 #define AIRCR_VECTKEY_MASK    ((uint32_t)0x05FA0000)
+
+#define BOOTLOADER_MAGIC 0xDEADBEEF
+// 40KB SRAM STM32F30X
+#define BOOT_TARGET_REGISTER ((uint32_t *)0x20009FFC)
+
+#define DEFAULT_STACK_POINTER ((uint32_t *)0x1FFFD800)
+#define SYSTEM_MEMORY_RESET_VECTOR ((uint32_t *) 0x1FFFD804)
+
 void SetSysClock();
 
 void systemReset(void)
@@ -33,12 +43,13 @@ void systemReset(void)
     SCB->AIRCR = AIRCR_VECTKEY_MASK | (uint32_t)0x04;
 }
 
-void systemResetToBootloader(void)
+void systemResetToBootloader(bootloaderRequestType_e requestType)
 {
+    UNUSED(requestType);
     // 1FFFF000 -> 20000200 -> SP
     // 1FFFF004 -> 1FFFF021 -> PC
 
-    *((uint32_t *)0x20009FFC) = 0xDEADBEEF; // 40KB SRAM STM32F30X
+    *BOOT_TARGET_REGISTER = BOOTLOADER_MAGIC;
 
     systemReset();
 }
@@ -46,29 +57,6 @@ void systemResetToBootloader(void)
 
 void enableGPIOPowerUsageAndNoiseReductions(void)
 {
-    RCC_AHBPeriphClockCmd(
-        RCC_AHBPeriph_GPIOA |
-        RCC_AHBPeriph_GPIOB |
-        RCC_AHBPeriph_GPIOC |
-        RCC_AHBPeriph_GPIOD |
-        RCC_AHBPeriph_GPIOE |
-        RCC_AHBPeriph_GPIOF,
-        ENABLE
-    );
-
-    gpio_config_t gpio;
-
-    gpio.mode = Mode_AIN;
-
-    gpio.pin = Pin_All & ~(Pin_13 | Pin_14 | Pin_15);  // Leave JTAG pins alone
-    gpioInit(GPIOA, &gpio);
-
-    gpio.pin = Pin_All;
-    gpioInit(GPIOB, &gpio);
-    gpioInit(GPIOC, &gpio);
-    gpioInit(GPIOD, &gpio);
-    gpioInit(GPIOE, &gpio);
-    gpioInit(GPIOF, &gpio);
 }
 
 bool isMPUSoftReset(void)
@@ -77,6 +65,21 @@ bool isMPUSoftReset(void)
         return true;
     else
         return false;
+}
+
+static void checkForBootLoaderRequest(void)
+{
+    if (*BOOT_TARGET_REGISTER == BOOTLOADER_MAGIC) {
+
+        *BOOT_TARGET_REGISTER = 0x0;
+
+        __enable_irq();
+        __set_MSP(*DEFAULT_STACK_POINTER);
+
+        ((void(*)(void))(*SYSTEM_MEMORY_RESET_VECTOR))();
+
+        while (1);
+    }
 }
 
 void systemInit(void)
@@ -90,7 +93,7 @@ void systemInit(void)
     // Configure NVIC preempt/priority groups
     NVIC_PriorityGroupConfig(NVIC_PRIORITY_GROUPING);
 
-    // cache RCC->CSR value to use it in isMPUSoftreset() and others
+    // cache RCC->CSR value to use it in isMPUSoftReset() and others
     cachedRccCsrValue = RCC->CSR;
     RCC_ClearFlag();
 
@@ -101,21 +104,4 @@ void systemInit(void)
 
     // SysTick
     SysTick_Config(SystemCoreClock / 1000);
-}
-
-void checkForBootLoaderRequest(void)
-{
-    void(*bootJump)(void);
-
-    if (*((uint32_t *)0x20009FFC) == 0xDEADBEEF) {
-
-        *((uint32_t *)0x20009FFC) = 0x0;
-
-        __enable_irq();
-        __set_MSP(*((uint32_t *)0x1FFFD800));
-
-        bootJump = (void(*)(void))(*((uint32_t *) 0x1FFFD804));
-        bootJump();
-        while (1);
-    }
 }

@@ -3,12 +3,13 @@
 FC_VER=$(make version)
 REVISION=$(git rev-parse --short HEAD)
 BRANCH=$(git rev-parse --abbrev-ref HEAD)
-REVISION=$(git rev-parse --short HEAD)
 LAST_COMMIT_DATE=$(git log -1 --date=short --format="%cd")
 TARGET_FILE=obj/betaflight_${FC_VER}_${TARGET}
 TRAVIS_REPO_SLUG=${TRAVIS_REPO_SLUG:=$USER/undefined}
 BUILDNAME=${BUILDNAME:=travis}
 TRAVIS_BUILD_NUMBER=${TRAVIS_BUILD_NUMBER:=undefined}
+
+MAKE="make EXTRA_FLAGS=-Werror"
 
 CURL_BASEOPTS=(
 	"--retry" "10"
@@ -47,7 +48,7 @@ elif [ $PUBLISHMETA ] ; then
 	fi
 
 elif [ $TARGET ] ; then
-    make $TARGET || exit $?
+    $MAKE $TARGET || exit $?
 
 	if [ $PUBLISH_URL ] ; then
 		if   [ -f ${TARGET_FILE}.bin ] ; then
@@ -64,8 +65,22 @@ elif [ $TARGET ] ; then
 	fi
 
 elif [ $GOAL ] ; then
-    make V=0 $GOAL
+    if [ "test-all" == "$GOAL" ] ; then
+        $MAKE checks || exit $?
+    else
+	 export V=0
+    fi
 
-else 
-    make V=0 all
+    $MAKE $GOAL || exit $?
+
+    if [ $PUBLISHCOV ] ; then
+        if [ "test-all" == "$GOAL" ] ; then
+            lcov --directory . -b src/test --capture --output-file coverage.info 2>&1 | grep -E ":version '402\*', prefer.*'406\*" --invert-match
+            lcov --remove coverage.info 'lib/test/*' 'src/test/*' '/usr/*' --output-file coverage.info # filter out system and test code
+            lcov --list coverage.info # debug before upload
+            coveralls-lcov coverage.info # uploads to coveralls
+        fi
+    fi
+else
+    $MAKE all
 fi

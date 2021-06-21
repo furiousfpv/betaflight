@@ -19,6 +19,8 @@
   ******************************************************************************
   */
 
+#include "platform.h"
+
 #include "usbd_usr.h"
 #include "usbd_ioreq.h"
 
@@ -122,5 +124,3 @@ void USBD_USR_DeviceResumed(void)
 {
   /* Users can do their application actions here for the USB-Reset */
 }
-
-

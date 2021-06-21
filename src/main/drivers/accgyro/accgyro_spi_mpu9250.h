@@ -1,7 +1,26 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #pragma once
 
-#include "drivers/sensor.h"
+#include "drivers/bus.h"
 
 #define mpu9250_CONFIG                      0x1A
 
@@ -18,9 +37,6 @@
 
 #define GYRO_SCALE_FACTOR  0.00053292f  // (4/131) * pi/180   (32.75 LSB = 1 DPS)
 
-#define MPU9250_WHO_AM_I_CONST              (0x71)
-#define MPU9255_WHO_AM_I_CONST              (0x73)
-
 #define MPU9250_BIT_RESET                   (0x80)
 
 // RF = Register Flag
@@ -28,12 +44,11 @@
 
 void mpu9250SpiResetGyro(void);
 
-bool mpu9250SpiDetect(const busDevice_t *bus);
+uint8_t mpu9250SpiDetect(const busDevice_t *bus);
 
 bool mpu9250SpiAccDetect(accDev_t *acc);
 bool mpu9250SpiGyroDetect(gyroDev_t *gyro);
 
 bool mpu9250SpiWriteRegister(const busDevice_t *bus, uint8_t reg, uint8_t data);
-bool verifympu9250SpiWriteRegister(const busDevice_t *bus, uint8_t reg, uint8_t data);
-bool mpu9250SpiReadRegister(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t *data);
-bool mpu9250SpiSlowReadRegister(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t *data);
+bool mpu9250SpiWriteRegisterVerify(const busDevice_t *bus, uint8_t reg, uint8_t data);
+bool mpu9250SpiReadRegBuf(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t *data);

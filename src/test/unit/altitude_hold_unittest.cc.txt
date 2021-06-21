@@ -22,7 +22,7 @@
 
 //#define DEBUG_ALTITUDE_HOLD
 
-#define BARO
+#define USE_BARO
 
 extern "C" {
     #include "debug.h"
@@ -45,7 +45,7 @@ extern "C" {
     #include "flight/mixer.h"
     #include "flight/pid.h"
     #include "flight/imu.h"
-    #include "flight/altitude.h"
+    #include "flight/position.h"
 
     #include "config/runtime_config.h"
 
@@ -133,7 +133,7 @@ TEST(AltitudeHoldTest, TestCalculateTiltAngle)
 
 extern "C" {
 uint32_t rcModeActivationMask;
-int16_t rcCommand[4];
+float rcCommand[4];
 int16_t rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 
 uint32_t accTimeSum ;        // keep track for integration of acc

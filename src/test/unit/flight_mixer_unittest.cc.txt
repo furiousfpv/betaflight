@@ -377,10 +377,10 @@ TEST_F(CustomMixerIntegrationTest, TestCustomMixer)
 
 extern "C" {
 rollAndPitchInclination_t inclination;
-rxRuntimeConfig_t rxRuntimeConfig;
+rxRuntimeState_t rxRuntimeState;
 
 int16_t axisPID[XYZ_AXIS_COUNT];
-int16_t rcCommand[4];
+float rcCommand[4];
 int16_t rcData[MAX_SUPPORTED_RC_CHANNEL_COUNT];
 
 uint32_t rcModeActivationMask;
@@ -392,7 +392,7 @@ uint8_t armingFlags;
 
 void delay(uint32_t) {}
 
-bool feature(uint32_t mask) {
+bool featureIsEnabled(uint32_t mask) {
     return (mask & testFeatureMask);
 }
 

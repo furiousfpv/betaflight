@@ -1,7 +1,26 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
 
 #pragma once
 
-#include "drivers/sensor.h"
+#include "drivers/bus.h"
 
 #define MPU6000_CONFIG              0x1A
 
@@ -12,15 +31,10 @@
 
 #define GYRO_SCALE_FACTOR  0.00053292f  // (4/131) * pi/180   (32.75 LSB = 1 DPS)
 
-#define MPU6000_WHO_AM_I_CONST              (0x68)
-
 // RF = Register Flag
 #define MPU_RF_DATA_RDY_EN (1 << 0)
 
-bool mpu6000SpiDetect(const busDevice_t *bus);
+uint8_t mpu6000SpiDetect(const busDevice_t *bus);
 
 bool mpu6000SpiAccDetect(accDev_t *acc);
 bool mpu6000SpiGyroDetect(gyroDev_t *gyro);
-
-bool mpu6000SpiWriteRegister(const busDevice_t *bus, uint8_t reg, uint8_t data);
-bool mpu6000SpiReadRegister(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t *data);

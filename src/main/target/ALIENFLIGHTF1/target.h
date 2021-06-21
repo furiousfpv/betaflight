@@ -1,46 +1,47 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
 #define TARGET_BOARD_IDENTIFIER "AFF1" // AlienFlight F1.
-#define TARGET_CONFIG
+#define USE_TARGET_CONFIG
 
-#define BRUSHED_ESC_AUTODETECT
+#define LED0_PIN                PB3
+#define LED1_PIN                PB4
 
-#define LED0                    PB3
-#define LED1                    PB4
-
-#define BEEPER                  PA12
+#define USE_BEEPER
+#define BEEPER_PIN              PA12
 
 #define USE_EXTI
 #define MAG_INT_EXTI            PC14
 #define USE_MPU_DATA_READY_SIGNAL
 //#define DEBUG_MPU_DATA_READY_INTERRUPT
 
-#define GYRO
+#define USE_GYRO
 #define USE_GYRO_MPU6050
 
-#define GYRO_MPU6050_ALIGN      CW0_DEG
+#define GYRO_1_ALIGN            CW0_DEG
 
-#define ACC
+#define USE_ACC
 #define USE_ACC_MPU6050
 
-#define ACC_MPU6050_ALIGN       CW0_DEG
 
 #define USE_UART1
 #define USE_UART2
@@ -62,8 +63,6 @@
 #define RSSI_ADC_PIN            PA1
 #define EXTERNAL1_ADC_PIN       PA5
 
-#define SPEKTRUM_BIND_PIN       PA3
-
 #define BINDPLUG_PIN            PB5
 
 #define DEFAULT_FEATURES        FEATURE_MOTOR_STOP
@@ -71,8 +70,6 @@
 #define SERIALRX_PROVIDER       SERIALRX_SPEKTRUM2048
 #define SERIALRX_UART           SERIAL_PORT_USART2
 #define RX_CHANNELS_TAER
-
-#define USE_SERIAL_4WAY_BLHELI_INTERFACE
 
 // IO - assuming all IOs on 48pin package
 #define TARGET_IO_PORTA         0xffff

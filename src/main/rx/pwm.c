@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -25,43 +28,52 @@
 
 #if defined(USE_PWM) || defined(USE_PPM)
 
-#include "drivers/rx_pwm.h"
-
 #include "common/utils.h"
 
 #include "config/feature.h"
 
-#include "fc/config.h"
+#include "pg/rx.h"
+
+#include "drivers/rx/rx_pwm.h"
+
+#include "config/config.h"
 
 #include "rx/rx.h"
 #include "rx/pwm.h"
 
-static uint16_t pwmReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfig, uint8_t channel)
+static float pwmReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t channel)
 {
-    UNUSED(rxRuntimeConfig);
+    UNUSED(rxRuntimeState);
     return pwmRead(channel);
 }
 
-static uint16_t ppmReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfig, uint8_t channel)
+static float ppmReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t channel)
 {
-    UNUSED(rxRuntimeConfig);
+    UNUSED(rxRuntimeState);
     return ppmRead(channel);
 }
 
-void rxPwmInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+void rxPwmInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxConfig);
 
-    rxRuntimeConfig->rxRefreshRate = 20000;
+    rxRuntimeState->rxRefreshRate = 20000;
 
     // configure PWM/CPPM read function and max number of channels. serial rx below will override both of these, if enabled
-    if (feature(FEATURE_RX_PARALLEL_PWM)) {
-        rxRuntimeConfig->channelCount = MAX_SUPPORTED_RC_PARALLEL_PWM_CHANNEL_COUNT;
-        rxRuntimeConfig->rcReadRawFn = pwmReadRawRC;
-    } else if (feature(FEATURE_RX_PPM)) {
-        rxRuntimeConfig->channelCount = MAX_SUPPORTED_RC_PPM_CHANNEL_COUNT;
-        rxRuntimeConfig->rcReadRawFn = ppmReadRawRC;
+    switch (rxRuntimeState->rxProvider) {
+    default:
+
+        break;
+    case RX_PROVIDER_PARALLEL_PWM:
+        rxRuntimeState->channelCount = MAX_SUPPORTED_RC_PARALLEL_PWM_CHANNEL_COUNT;
+        rxRuntimeState->rcReadRawFn = pwmReadRawRC;
+
+        break;
+    case RX_PROVIDER_PPM:
+        rxRuntimeState->channelCount = MAX_SUPPORTED_RC_PPM_CHANNEL_COUNT;
+        rxRuntimeState->rcReadRawFn = ppmReadRawRC;
+
+        break;
     }
 }
 #endif
-

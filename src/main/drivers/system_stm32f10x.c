@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -20,7 +23,6 @@
 
 #include "platform.h"
 
-#include "drivers/gpio.h"
 #include "drivers/nvic.h"
 #include "drivers/system.h"
 
@@ -35,8 +37,10 @@ void systemReset(void)
     SCB->AIRCR = AIRCR_VECTKEY_MASK | (uint32_t)0x04;
 }
 
-void systemResetToBootloader(void)
+void systemResetToBootloader(bootloaderRequestType_e requestType)
 {
+    UNUSED(requestType);
+
     // 1FFFF000 -> 20000200 -> SP
     // 1FFFF004 -> 1FFFF021 -> PC
 
@@ -44,17 +48,25 @@ void systemResetToBootloader(void)
     systemReset();
 }
 
+static void checkForBootLoaderRequest(void)
+{
+    void(*bootJump)(void);
+
+    if (*((uint32_t *)0x20004FF0) == 0xDEADBEEF) {
+
+        *((uint32_t *)0x20004FF0) = 0x0;
+
+        __enable_irq();
+        __set_MSP(*((uint32_t *)0x1FFFF000));
+
+        bootJump = (void(*)(void))(*((uint32_t *) 0x1FFFF004));
+        bootJump();
+        while (1);
+    }
+}
+
 void enableGPIOPowerUsageAndNoiseReductions(void)
 {
-    RCC_APB2PeriphClockCmd(RCC_APB2Periph_GPIOA | RCC_APB2Periph_GPIOB | RCC_APB2Periph_GPIOC, ENABLE);
-
-    gpio_config_t gpio;
-
-    gpio.mode = Mode_AIN;
-    gpio.pin = Pin_All;
-    gpioInit(GPIOA, &gpio);
-    gpioInit(GPIOB, &gpio);
-    gpioInit(GPIOC, &gpio);
 }
 
 bool isMPUSoftReset(void)
@@ -71,7 +83,7 @@ void systemInit(void)
 
     SetSysClock(false);
 
-#ifdef CC3D
+#if defined(OPBL)
     /* Accounts for OP Bootloader, set the Vector Table base address as specified in .ld file */
     extern void *isr_vector_table_base;
 
@@ -83,7 +95,7 @@ void systemInit(void)
     // Turn on clocks for stuff we use
     RCC_APB2PeriphClockCmd(RCC_APB2Periph_AFIO, ENABLE);
 
-    // cache RCC->CSR value to use it in isMPUSoftreset() and others
+    // cache RCC->CSR value to use it in isMPUSoftReset() and others
     cachedRccCsrValue = RCC->CSR;
     RCC_ClearFlag();
 
@@ -91,13 +103,14 @@ void systemInit(void)
 
     // Set USART1 TX (PA9) to output and high state to prevent a rs232 break condition on reset.
     // See issue https://github.com/cleanflight/cleanflight/issues/1433
-    gpio_config_t gpio;
+    GPIO_InitTypeDef GPIO_InitStructure = {
+        .GPIO_Mode = GPIO_Mode_Out_PP,
+        .GPIO_Pin = GPIO_Pin_9,
+        .GPIO_Speed = GPIO_Speed_2MHz
+    };
 
-    gpio.mode = Mode_Out_PP;
-    gpio.speed = Speed_2MHz;
-    gpio.pin = Pin_9;
-    digitalHi(GPIOA, gpio.pin);
-    gpioInit(GPIOA, &gpio);
+    GPIOA->BSRR = GPIO_InitStructure.GPIO_Pin;
+    GPIO_Init(GPIOA, &GPIO_InitStructure);
 
     // Turn off JTAG port 'cause we're using the GPIO for leds
 #define AFIO_MAPR_SWJ_CFG_NO_JTAG_SW            (0x2 << 24)
@@ -108,21 +121,4 @@ void systemInit(void)
 
     // SysTick
     SysTick_Config(SystemCoreClock / 1000);
-}
-
-void checkForBootLoaderRequest(void)
-{
-    void(*bootJump)(void);
-
-    if (*((uint32_t *)0x20004FF0) == 0xDEADBEEF) {
-
-        *((uint32_t *)0x20004FF0) = 0x0;
-
-        __enable_irq();
-        __set_MSP(*((uint32_t *)0x1FFFF000));
-
-        bootJump = (void(*)(void))(*((uint32_t *) 0x1FFFF004));
-        bootJump();
-        while (1);
-    }
 }

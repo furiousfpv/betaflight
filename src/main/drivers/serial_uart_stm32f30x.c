@@ -1,22 +1,26 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
  * Authors:
+ * jflyper - Refactoring, cleanup and made pin-configurable
  * Dominic Clifton - Port baseflight STM32F10x to STM32F30x for cleanflight
  * J. Ihlein - Code from FocusFlight32
  * Bill Nesbitt - Code from AutoQuad
@@ -26,365 +30,261 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <platform.h>
+#include "platform.h"
+
+#ifdef USE_UART
 
 #include "drivers/system.h"
 #include "drivers/io.h"
 #include "drivers/nvic.h"
-#include "dma.h"
-#include "rcc.h"
+#include "drivers/dma.h"
+#include "drivers/rcc.h"
 
-#include "serial.h"
-#include "serial_uart.h"
-#include "serial_uart_impl.h"
+#include "drivers/serial.h"
+#include "drivers/serial_uart.h"
+#include "drivers/serial_uart_impl.h"
 
+// XXX Will DMA eventually be configurable?
+// XXX Do these belong here?
+
+#ifdef USE_UART1_RX_DMA
+# define UART1_RX_DMA DMA1_Channel5
+#else
+# define UART1_RX_DMA 0
+#endif
+
+#ifdef USE_UART1_TX_DMA
+# define UART1_TX_DMA DMA1_Channel4
+#else
+# define UART1_TX_DMA 0
+#endif
+
+#ifdef USE_UART2_RX_DMA
+# define UART2_RX_DMA DMA1_Channel6
+#else
+# define UART2_RX_DMA 0
+#endif
+
+#ifdef USE_UART2_TX_DMA
+# define UART2_TX_DMA DMA1_Channel7
+#else
+# define UART2_TX_DMA 0
+#endif
+
+#ifdef USE_UART3_RX_DMA
+# define UART3_RX_DMA DMA1_Channel3
+#else
+# define UART3_RX_DMA 0
+#endif
+
+#ifdef USE_UART3_TX_DMA
+# define UART3_TX_DMA DMA1_Channel2
+#else
+# define UART3_TX_DMA 0
+#endif
+
+#ifdef USE_UART4_RX_DMA
+# define UART4_RX_DMA DMA2_Channel3
+#else
+# define UART4_RX_DMA 0
+#endif
+
+#ifdef USE_UART4_TX_DMA
+# define UART4_TX_DMA DMA2_Channel5
+#else
+# define UART4_TX_DMA 0
+#endif
+
+const uartHardware_t uartHardware[UARTDEV_COUNT] = {
 #ifdef USE_UART1
-#ifndef UART1_TX_PIN
-#define UART1_TX_PIN        PA9  // PA9
-#endif
-#ifndef UART1_RX_PIN
-#define UART1_RX_PIN        PA10 // PA10
-#endif
+    {
+        .device = UARTDEV_1,
+        .reg = USART1,
+        .rxDMAResource = (dmaResource_t *)UART1_RX_DMA,
+        .txDMAResource = (dmaResource_t *)UART1_TX_DMA,
+        .rxPins = { { DEFIO_TAG_E(PA10) }, { DEFIO_TAG_E(PB7) }, { DEFIO_TAG_E(PC5) }, { DEFIO_TAG_E(PE1) } },
+        .txPins = { { DEFIO_TAG_E(PA9) }, { DEFIO_TAG_E(PB6) }, { DEFIO_TAG_E(PC4) }, { DEFIO_TAG_E(PE0) } },
+        .rcc = RCC_APB2(USART1),
+        .af = GPIO_AF_7,
+        .irqn = USART1_IRQn,
+        .txPriority = NVIC_PRIO_SERIALUART1_TXDMA,
+        .rxPriority = NVIC_PRIO_SERIALUART1_RXDMA,
+        .txBuffer = uart1TxBuffer,
+        .rxBuffer = uart1RxBuffer,
+        .txBufferSize = sizeof(uart1TxBuffer),
+        .rxBufferSize = sizeof(uart1RxBuffer),
+    },
 #endif
 
 #ifdef USE_UART2
-#ifndef UART2_TX_PIN
-#define UART2_TX_PIN        PD5 // PD5
-#endif
-#ifndef UART2_RX_PIN
-#define UART2_RX_PIN        PD6 // PD6
-#endif
+    {
+        .device = UARTDEV_2,
+        .reg = USART2,
+        .rxDMAResource = (dmaResource_t *)UART2_RX_DMA,
+        .txDMAResource = (dmaResource_t *)UART2_TX_DMA,
+        .rxPins = { { DEFIO_TAG_E(PA15) }, { DEFIO_TAG_E(PA3) }, { DEFIO_TAG_E(PB4) }, { DEFIO_TAG_E(PD6) } },
+        .txPins = { { DEFIO_TAG_E(PA14) }, { DEFIO_TAG_E(PA2) }, { DEFIO_TAG_E(PB3) }, { DEFIO_TAG_E(PD5) } },
+        .rcc = RCC_APB1(USART2),
+        .af = GPIO_AF_7,
+        .irqn = USART2_IRQn,
+        .txPriority = NVIC_PRIO_SERIALUART2_TXDMA,
+        .rxPriority = NVIC_PRIO_SERIALUART2_RXDMA,
+        .txBuffer = uart2TxBuffer,
+        .rxBuffer = uart2RxBuffer,
+        .txBufferSize = sizeof(uart2TxBuffer),
+        .rxBufferSize = sizeof(uart2RxBuffer),
+    },
 #endif
 
 #ifdef USE_UART3
-#ifndef UART3_TX_PIN
-#define UART3_TX_PIN        PB10 // PB10 (AF7)
-#endif
-#ifndef UART3_RX_PIN
-#define UART3_RX_PIN        PB11 // PB11 (AF7)
-#endif
+    {
+        .device = UARTDEV_3,
+        .reg = USART3,
+        .rxDMAResource = (dmaResource_t *)UART3_RX_DMA,
+        .txDMAResource = (dmaResource_t *)UART3_TX_DMA,
+        .rxPins = { { DEFIO_TAG_E(PB11) }, { DEFIO_TAG_E(PC11) }, { DEFIO_TAG_E(PD9) } },
+        .txPins = { { DEFIO_TAG_E(PB10) }, { DEFIO_TAG_E(PC10) }, { DEFIO_TAG_E(PD8) } },
+        .rcc = RCC_APB1(USART3),
+        .af = GPIO_AF_7,
+        .irqn = USART3_IRQn,
+        .txPriority = NVIC_PRIO_SERIALUART3_TXDMA,
+        .rxPriority = NVIC_PRIO_SERIALUART3_RXDMA,
+        .txBuffer = uart3TxBuffer,
+        .rxBuffer = uart3RxBuffer,
+        .txBufferSize = sizeof(uart3TxBuffer),
+        .rxBufferSize = sizeof(uart3RxBuffer),
+    },
 #endif
 
 #ifdef USE_UART4
-#ifndef UART4_TX_PIN
-#define UART4_TX_PIN        PC10 // PC10 (AF5)
-#endif
-#ifndef UART4_RX_PIN
-#define UART4_RX_PIN        PC11 // PC11 (AF5)
-#endif
+    // UART4 XXX Not tested (yet!?) Need 303RC, e.g. LUX for testing
+    {
+        .device = UARTDEV_4,
+        .reg = UART4,
+        .rxDMAResource = (dmaResource_t *)0, // XXX UART4_RX_DMA !?
+        .txDMAResource = (dmaResource_t *)0, // XXX UART4_TX_DMA !?
+        .rxPins = { { DEFIO_TAG_E(PC11) } },
+        .txPins = { { DEFIO_TAG_E(PC10) } },
+        .rcc = RCC_APB1(UART4),
+        .af = GPIO_AF_5,
+        .irqn = UART4_IRQn,
+        .txPriority = NVIC_PRIO_SERIALUART4_TXDMA,
+        .rxPriority = NVIC_PRIO_SERIALUART4_RXDMA,
+        .txBuffer = uart4TxBuffer,
+        .rxBuffer = uart4RxBuffer,
+        .txBufferSize = sizeof(uart4TxBuffer),
+        .rxBufferSize = sizeof(uart4RxBuffer),
+    },
 #endif
 
 #ifdef USE_UART5
-#ifndef UART5_TX_PIN             // The real UART5_RX is on PD2, no board is using.
-#define UART5_TX_PIN        PC12 // PC12 (AF5)
+    // UART5 XXX Not tested (yet!?) Need 303RC; e.g. LUX for testing
+    {
+        .device = UARTDEV_5,
+        .reg = UART5,
+        .rxDMAResource = (dmaResource_t *)0,
+        .txDMAResource = (dmaResource_t *)0,
+        .rxPins = { { DEFIO_TAG_E(PD2) } },
+        .txPins = { { DEFIO_TAG_E(PC12) } },
+        .rcc = RCC_APB1(UART5),
+        .af = GPIO_AF_5,
+        .irqn = UART5_IRQn,
+        .txPriority = NVIC_PRIO_SERIALUART5,
+        .rxPriority = NVIC_PRIO_SERIALUART5,
+        .txBuffer = uart5TxBuffer,
+        .rxBuffer = uart5RxBuffer,
+        .txBufferSize = sizeof(uart5TxBuffer),
+        .rxBufferSize = sizeof(uart5RxBuffer),
+    },
 #endif
-#ifndef UART5_RX_PIN
-#define UART5_RX_PIN        PC12 // PC12 (AF5)
-#endif
-#endif
+};
 
-#ifdef USE_UART1
-static uartPort_t uartPort1;
-#endif
-#ifdef USE_UART2
-static uartPort_t uartPort2;
-#endif
-#ifdef USE_UART3
-static uartPort_t uartPort3;
-#endif
-#ifdef USE_UART4
-static uartPort_t uartPort4;
-#endif
-#ifdef USE_UART5
-static uartPort_t uartPort5;
-#endif
-
-#if defined(USE_UART1_TX_DMA) || defined(USE_UART2_TX_DMA) || defined(USE_UART3_TX_DMA)
-static void handleUsartTxDma(dmaChannelDescriptor_t* descriptor)
+void uartDmaIrqHandler(dmaChannelDescriptor_t* descriptor)
 {
     uartPort_t *s = (uartPort_t*)(descriptor->userParam);
     DMA_CLEAR_FLAG(descriptor, DMA_IT_TCIF);
-    DMA_Cmd(descriptor->ref, DISABLE);
+    xDMA_Cmd(descriptor->ref, DISABLE);
 
-    if (s->port.txBufferHead != s->port.txBufferTail)
-        uartStartTxDMA(s);
-    else
-        s->txDMAEmpty = true;
+    uartTryStartTxDMA(s);
 }
-#endif
 
-void serialUARTInit(IO_t tx, IO_t rx, portMode_t mode, portOptions_t options, uint8_t af, uint8_t index)
+void serialUARTInitIO(IO_t txIO, IO_t rxIO, portMode_e mode, portOptions_e options, uint8_t af, uint8_t index)
 {
-    if ((options & SERIAL_BIDIR) && tx) {
+    if ((options & SERIAL_BIDIR) && txIO) {
         ioConfig_t ioCfg = IO_CONFIG(GPIO_Mode_AF, GPIO_Speed_50MHz,
-            ((options & SERIAL_INVERTED) || (options & SERIAL_BIDIR_PP)) ? GPIO_OType_PP : GPIO_OType_OD,
-            ((options & SERIAL_INVERTED) || (options & SERIAL_BIDIR_PP)) ? GPIO_PuPd_DOWN : GPIO_PuPd_UP
+            ((options & SERIAL_INVERTED) || (options & SERIAL_BIDIR_PP) || (options & SERIAL_BIDIR_PP_PD)) ? GPIO_OType_PP : GPIO_OType_OD,
+            ((options & SERIAL_INVERTED) || (options & SERIAL_BIDIR_PP_PD)) ? GPIO_PuPd_DOWN : GPIO_PuPd_UP
         );
 
-        IOInit(tx, OWNER_SERIAL_TX, index);
-        IOConfigGPIOAF(tx, ioCfg, af);
+        IOInit(txIO, OWNER_SERIAL_TX, RESOURCE_INDEX(index));
+        IOConfigGPIOAF(txIO, ioCfg, af);
 
         if (!(options & SERIAL_INVERTED))
-            IOLo(tx);   // OpenDrain output should be inactive
+            IOLo(txIO);   // OpenDrain output should be inactive
     } else {
         ioConfig_t ioCfg = IO_CONFIG(GPIO_Mode_AF, GPIO_Speed_50MHz, GPIO_OType_PP, (options & SERIAL_INVERTED) ? GPIO_PuPd_DOWN : GPIO_PuPd_UP);
-        if ((mode & MODE_TX) && tx) {
-            IOInit(tx, OWNER_SERIAL_TX, index);
-            IOConfigGPIOAF(tx, ioCfg, af);
+        if ((mode & MODE_TX) && txIO) {
+            IOInit(txIO, OWNER_SERIAL_TX, RESOURCE_INDEX(index));
+            IOConfigGPIOAF(txIO, ioCfg, af);
         }
 
-        if ((mode & MODE_RX) && rx) {
-            IOInit(rx, OWNER_SERIAL_RX, index);
-            IOConfigGPIOAF(rx, ioCfg, af);
+        if ((mode & MODE_RX) && rxIO) {
+            IOInit(rxIO, OWNER_SERIAL_RX, RESOURCE_INDEX(index));
+            IOConfigGPIOAF(rxIO, ioCfg, af);
         }
     }
 }
 
-#ifdef USE_UART1
-uartPort_t *serialUART1(uint32_t baudRate, portMode_t mode, portOptions_t options)
-{
-    uartPort_t *s;
-    static volatile uint8_t rx1Buffer[UART1_RX_BUFFER_SIZE];
-    static volatile uint8_t tx1Buffer[UART1_TX_BUFFER_SIZE];
+// XXX Should serialUART be consolidated?
 
-    s = &uartPort1;
+uartPort_t *serialUART(UARTDevice_e device, uint32_t baudRate, portMode_e mode, portOptions_e options)
+{
+    uartDevice_t *uartDev = uartDevmap[device];
+    if (!uartDev) {
+        return NULL;
+    }
+
+    uartPort_t *s = &(uartDev->port);
     s->port.vTable = uartVTable;
 
     s->port.baudRate = baudRate;
 
-    s->port.rxBufferSize = UART1_RX_BUFFER_SIZE;
-    s->port.txBufferSize = UART1_TX_BUFFER_SIZE;
-    s->port.rxBuffer = rx1Buffer;
-    s->port.txBuffer = tx1Buffer;
+    const uartHardware_t *hardware = uartDev->hardware;
 
-    s->USARTx = USART1;
+    s->USARTx = hardware->reg;
 
-#ifdef USE_UART1_RX_DMA
-    dmaInit(DMA1_CH5_HANDLER, OWNER_SERIAL, 1);
-    s->rxDMAChannel = DMA1_Channel5;
-    s->rxDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->RDR;
-#endif
-#ifdef USE_UART1_TX_DMA
-    s->txDMAChannel = DMA1_Channel4;
-    s->txDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->TDR;
-#endif
 
-    RCC_ClockCmd(RCC_APB2(USART1), ENABLE);
+    s->port.rxBuffer = hardware->rxBuffer;
+    s->port.txBuffer = hardware->txBuffer;
+    s->port.rxBufferSize = hardware->rxBufferSize;
+    s->port.txBufferSize = hardware->txBufferSize;
 
-#if defined(USE_UART1_TX_DMA) || defined(USE_UART1_RX_DMA)
-    RCC_ClockCmd(RCC_AHB(DMA1), ENABLE);
-#endif
+    RCC_ClockCmd(hardware->rcc, ENABLE);
 
-    serialUARTInit(IOGetByTag(IO_TAG(UART1_TX_PIN)), IOGetByTag(IO_TAG(UART1_RX_PIN)), mode, options, GPIO_AF_7, 1);
+    uartConfigureDma(uartDev);
 
-#ifdef USE_UART1_TX_DMA
-    dmaInit(DMA1_CH4_HANDLER, OWNER_SERIAL, 1);
-    dmaSetHandler(DMA1_CH4_HANDLER, handleUsartTxDma, NVIC_PRIO_SERIALUART1_TXDMA, (uint32_t)&uartPort1);
-#endif
+    serialUARTInitIO(IOGetByTag(uartDev->tx.pin), IOGetByTag(uartDev->rx.pin), mode, options, hardware->af, device);
 
-#ifndef USE_UART1_RX_DMA
-    NVIC_InitTypeDef NVIC_InitStructure;
+    if (!s->rxDMAResource || !s->txDMAResource) {
+        NVIC_InitTypeDef NVIC_InitStructure;
 
-    NVIC_InitStructure.NVIC_IRQChannel = USART1_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(NVIC_PRIO_SERIALUART1_RXDMA);
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART1_RXDMA);
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-#endif
+        NVIC_InitStructure.NVIC_IRQChannel = hardware->irqn;
+        NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(hardware->rxPriority);
+        NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(hardware->rxPriority);
+        NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
+        NVIC_Init(&NVIC_InitStructure);
+    }
 
     return s;
 }
-#endif
 
-#ifdef USE_UART2
-uartPort_t *serialUART2(uint32_t baudRate, portMode_t mode, portOptions_t options)
-{
-    uartPort_t *s;
-    static volatile uint8_t rx2Buffer[UART2_RX_BUFFER_SIZE];
-    static volatile uint8_t tx2Buffer[UART2_TX_BUFFER_SIZE];
-
-    s = &uartPort2;
-    s->port.vTable = uartVTable;
-
-    s->port.baudRate = baudRate;
-
-    s->port.rxBufferSize = UART2_RX_BUFFER_SIZE;
-    s->port.txBufferSize = UART2_TX_BUFFER_SIZE;
-    s->port.rxBuffer = rx2Buffer;
-    s->port.txBuffer = tx2Buffer;
-
-    s->USARTx = USART2;
-
-#ifdef USE_UART2_RX_DMA
-    dmaInit(DMA1_CH6_HANDLER, OWNER_SERIAL, 2);
-    s->rxDMAChannel = DMA1_Channel6;
-    s->rxDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->RDR;
-#endif
-#ifdef USE_UART2_TX_DMA
-    dmaInit(DMA1_CH7_HANDLER, OWNER_SERIAL, 2);
-    s->txDMAChannel = DMA1_Channel7;
-    s->txDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->TDR;
-#endif
-
-    RCC_ClockCmd(RCC_APB1(USART2), ENABLE);
-
-#if defined(USE_UART2_TX_DMA) || defined(USE_UART2_RX_DMA)
-    RCC_ClockCmd(RCC_AHB(DMA1), ENABLE);
-#endif
-
-    serialUARTInit(IOGetByTag(IO_TAG(UART2_TX_PIN)), IOGetByTag(IO_TAG(UART2_RX_PIN)), mode, options, GPIO_AF_7, 2);
-
-#ifdef USE_UART2_TX_DMA
-    // DMA TX Interrupt
-    dmaSetHandler(DMA1_CH7_HANDLER, handleUsartTxDma, NVIC_PRIO_SERIALUART2_TXDMA, (uint32_t)&uartPort2);
-#endif
-
-#ifndef USE_UART2_RX_DMA
-    NVIC_InitTypeDef NVIC_InitStructure;
-
-    NVIC_InitStructure.NVIC_IRQChannel = USART2_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(NVIC_PRIO_SERIALUART2_RXDMA);
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART2_RXDMA);
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-#endif
-
-    return s;
-}
-#endif
-
-#ifdef USE_UART3
-uartPort_t *serialUART3(uint32_t baudRate, portMode_t mode, portOptions_t options)
-{
-    uartPort_t *s;
-    static volatile uint8_t rx3Buffer[UART3_RX_BUFFER_SIZE];
-    static volatile uint8_t tx3Buffer[UART3_TX_BUFFER_SIZE];
-
-    s = &uartPort3;
-    s->port.vTable = uartVTable;
-
-    s->port.baudRate = baudRate;
-
-    s->port.rxBufferSize = UART3_RX_BUFFER_SIZE;
-    s->port.txBufferSize = UART3_TX_BUFFER_SIZE;
-    s->port.rxBuffer = rx3Buffer;
-    s->port.txBuffer = tx3Buffer;
-
-    s->USARTx = USART3;
-
-#ifdef USE_UART3_RX_DMA
-    dmaInit(DMA1_CH3_HANDLER, OWNER_SERIAL, 3);
-    s->rxDMAChannel = DMA1_Channel3;
-    s->rxDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->RDR;
-#endif
-#ifdef USE_UART3_TX_DMA
-    dmaInit(DMA1_CH2_HANDLER, OWNER_SERIAL, 3);
-    s->txDMAChannel = DMA1_Channel2;
-    s->txDMAPeripheralBaseAddr = (uint32_t)&s->USARTx->TDR;
-#endif
-
-    RCC_ClockCmd(RCC_APB1(USART3), ENABLE);
-
-#if defined(USE_UART3_TX_DMA) || defined(USE_UART3_RX_DMA)
-    RCC_AHBClockCmd(RCC_AHB(DMA1), ENABLE);
-#endif
-
-    serialUARTInit(IOGetByTag(IO_TAG(UART3_TX_PIN)), IOGetByTag(IO_TAG(UART3_RX_PIN)), mode, options, GPIO_AF_7, 3);
-
-#ifdef USE_UART3_TX_DMA
-    // DMA TX Interrupt
-    dmaSetHandler(DMA1_CH2_HANDLER, handleUsartTxDma, NVIC_PRIO_SERIALUART3_TXDMA, (uint32_t)&uartPort3);
-#endif
-
-#ifndef USE_UART3_RX_DMA
-    NVIC_InitTypeDef NVIC_InitStructure;
-
-    NVIC_InitStructure.NVIC_IRQChannel = USART3_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(NVIC_PRIO_SERIALUART3_RXDMA);
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART3_RXDMA);
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-#endif
-
-    return s;
-}
-#endif
-
-#ifdef USE_UART4
-uartPort_t *serialUART4(uint32_t baudRate, portMode_t mode, portOptions_t options)
-{
-    uartPort_t *s;
-    static volatile uint8_t rx4Buffer[UART4_RX_BUFFER_SIZE];
-    static volatile uint8_t tx4Buffer[UART4_TX_BUFFER_SIZE];
-    NVIC_InitTypeDef NVIC_InitStructure;
-
-    s = &uartPort4;
-    s->port.vTable = uartVTable;
-
-    s->port.baudRate = baudRate;
-
-    s->port.rxBufferSize = UART4_RX_BUFFER_SIZE;
-    s->port.txBufferSize = UART4_TX_BUFFER_SIZE;
-    s->port.rxBuffer = rx4Buffer;
-    s->port.txBuffer = tx4Buffer;
-
-    s->USARTx = UART4;
-
-    RCC_ClockCmd(RCC_APB1(UART4), ENABLE);
-
-    serialUARTInit(IOGetByTag(IO_TAG(UART4_TX_PIN)), IOGetByTag(IO_TAG(UART4_RX_PIN)), mode, options, GPIO_AF_5, 4);
-
-    NVIC_InitStructure.NVIC_IRQChannel = UART4_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(NVIC_PRIO_SERIALUART4);
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART4);
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-
-    return s;
-}
-#endif
-
-#ifdef USE_UART5
-uartPort_t *serialUART5(uint32_t baudRate, portMode_t mode, portOptions_t options)
-{
-    uartPort_t *s;
-    static volatile uint8_t rx5Buffer[UART5_RX_BUFFER_SIZE];
-    static volatile uint8_t tx5Buffer[UART5_TX_BUFFER_SIZE];
-    NVIC_InitTypeDef NVIC_InitStructure;
-
-    s = &uartPort5;
-    s->port.vTable = uartVTable;
-
-    s->port.baudRate = baudRate;
-
-    s->port.rxBufferSize = UART5_RX_BUFFER_SIZE;
-    s->port.txBufferSize = UART5_TX_BUFFER_SIZE;
-    s->port.rxBuffer = rx5Buffer;
-    s->port.txBuffer = tx5Buffer;
-
-    s->USARTx = UART5;
-
-    RCC_ClockCmd(RCC_APB1(UART5), ENABLE);
-
-    serialUARTInit(IOGetByTag(IO_TAG(UART5_TX_PIN)), IOGetByTag(IO_TAG(UART5_RX_PIN)), mode, options, GPIO_AF_5, 5);
-
-    NVIC_InitStructure.NVIC_IRQChannel = UART5_IRQn;
-    NVIC_InitStructure.NVIC_IRQChannelPreemptionPriority = NVIC_PRIORITY_BASE(NVIC_PRIO_SERIALUART5);
-    NVIC_InitStructure.NVIC_IRQChannelSubPriority = NVIC_PRIORITY_SUB(NVIC_PRIO_SERIALUART5);
-    NVIC_InitStructure.NVIC_IRQChannelCmd = ENABLE;
-    NVIC_Init(&NVIC_InitStructure);
-
-    return s;
-}
-#endif
-
-void usartIrqHandler(uartPort_t *s)
+void uartIrqHandler(uartPort_t *s)
 {
     uint32_t ISR = s->USARTx->ISR;
 
-    if (!s->rxDMAChannel && (ISR & USART_FLAG_RXNE)) {
+    if (!s->rxDMAResource && (ISR & USART_FLAG_RXNE)) {
         if (s->port.rxCallback) {
-            s->port.rxCallback(s->USARTx->RDR);
+            s->port.rxCallback(s->USARTx->RDR, s->port.rxCallbackData);
         } else {
             s->port.rxBuffer[s->port.rxBufferHead++] = s->USARTx->RDR;
             if (s->port.rxBufferHead >= s->port.rxBufferSize) {
@@ -393,7 +293,7 @@ void usartIrqHandler(uartPort_t *s)
         }
     }
 
-    if (!s->txDMAChannel && (ISR & USART_FLAG_TXE)) {
+    if (!s->txDMAResource && (ISR & USART_FLAG_TXE)) {
         if (s->port.txBufferTail != s->port.txBufferHead) {
             USART_SendData(s->USARTx, s->port.txBuffer[s->port.txBufferTail++]);
             if (s->port.txBufferTail >= s->port.txBufferSize) {
@@ -406,51 +306,15 @@ void usartIrqHandler(uartPort_t *s)
 
     if (ISR & USART_FLAG_ORE)
     {
-        USART_ClearITPendingBit (s->USARTx, USART_IT_ORE);
+        USART_ClearITPendingBit(s->USARTx, USART_IT_ORE);
+    }
+
+    if (ISR & USART_FLAG_IDLE) {
+        if (s->port.idleCallback) {
+            s->port.idleCallback();
+        }
+
+        USART_ClearITPendingBit(s->USARTx, USART_IT_IDLE);
     }
 }
-
-#ifdef USE_UART1
-void USART1_IRQHandler(void)
-{
-    uartPort_t *s = &uartPort1;
-
-    usartIrqHandler(s);
-}
-#endif
-
-#ifdef USE_UART2
-void USART2_IRQHandler(void)
-{
-    uartPort_t *s = &uartPort2;
-
-    usartIrqHandler(s);
-}
-#endif
-
-#ifdef USE_UART3
-void USART3_IRQHandler(void)
-{
-    uartPort_t *s = &uartPort3;
-
-    usartIrqHandler(s);
-}
-#endif
-
-#ifdef USE_UART4
-void UART4_IRQHandler(void)
-{
-    uartPort_t *s = &uartPort4;
-
-    usartIrqHandler(s);
-}
-#endif
-
-#ifdef USE_UART5
-void UART5_IRQHandler(void)
-{
-    uartPort_t *s = &uartPort5;
-
-    usartIrqHandler(s);
-}
-#endif
+#endif // USE_UART

@@ -26,6 +26,9 @@
  */
 
 /* Includes ------------------------------------------------------------------*/
+
+#include "platform.h"
+
 #include "usb_lib.h"
 #include "usb_conf.h"
 #include "usb_prop.h"
@@ -375,4 +378,3 @@ uint32_t Virtual_Com_Port_GetBaudRate(void)
 }
 
 /************************ (C) COPYRIGHT STMicroelectronics *****END OF FILE****/
-

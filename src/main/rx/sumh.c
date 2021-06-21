@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
@@ -27,22 +30,22 @@
 
 #include "platform.h"
 
-#ifdef SERIAL_RX
+#ifdef USE_SERIALRX_SUMH
 
 #include "common/utils.h"
 
-#include "drivers/system.h"
+#include "drivers/time.h"
 
 #include "io/serial.h"
 
-#ifdef TELEMETRY
+#ifdef USE_TELEMETRY
 #include "telemetry/telemetry.h"
 #endif
 
+#include "pg/rx.h"
+
 #include "rx/rx.h"
 #include "rx/sumh.h"
-
-// driver for SUMH receiver using UART2
 
 #define SUMH_BAUDRATE 115200
 
@@ -58,8 +61,10 @@ static serialPort_t *sumhPort;
 
 
 // Receive ISR callback
-static void sumhDataReceive(uint16_t c)
+static void sumhDataReceive(uint16_t c, void *data)
 {
+    UNUSED(data);
+
     uint32_t sumhTime;
     static uint32_t sumhTimeLast, sumhTimeInterval;
     static uint8_t sumhFramePosition;
@@ -80,8 +85,10 @@ static void sumhDataReceive(uint16_t c)
     }
 }
 
-static uint8_t sumhFrameStatus(void)
+static uint8_t sumhFrameStatus(rxRuntimeState_t *rxRuntimeState)
 {
+    UNUSED(rxRuntimeState);
+
     uint8_t channelIndex;
 
     if (!sumhFrameDone) {
@@ -101,9 +108,9 @@ static uint8_t sumhFrameStatus(void)
     return RX_FRAME_COMPLETE;
 }
 
-static uint16_t sumhReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfig, uint8_t chan)
+static float sumhReadRawRC(const rxRuntimeState_t *rxRuntimeState, uint8_t chan)
 {
-    UNUSED(rxRuntimeConfig);
+    UNUSED(rxRuntimeState);
 
     if (chan >= SUMH_MAX_CHANNEL_COUNT) {
         return 0;
@@ -112,30 +119,30 @@ static uint16_t sumhReadRawRC(const rxRuntimeConfig_t *rxRuntimeConfig, uint8_t 
     return sumhChannels[chan];
 }
 
-bool sumhInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool sumhInit(const rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState)
 {
     UNUSED(rxConfig);
 
-    rxRuntimeConfig->channelCount = SUMH_MAX_CHANNEL_COUNT;
-    rxRuntimeConfig->rxRefreshRate = 11000;
+    rxRuntimeState->channelCount = SUMH_MAX_CHANNEL_COUNT;
+    rxRuntimeState->rxRefreshRate = 11000;
 
-    rxRuntimeConfig->rcReadRawFn = sumhReadRawRC;
-    rxRuntimeConfig->rcFrameStatusFn = sumhFrameStatus;
+    rxRuntimeState->rcReadRawFn = sumhReadRawRC;
+    rxRuntimeState->rcFrameStatusFn = sumhFrameStatus;
 
     const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_RX_SERIAL);
     if (!portConfig) {
         return false;
     }
 
-#ifdef TELEMETRY
-    bool portShared = telemetryCheckRxPortShared(portConfig);
+#ifdef USE_TELEMETRY
+    bool portShared = telemetryCheckRxPortShared(portConfig, rxRuntimeState->serialrxProvider);
 #else
     bool portShared = false;
 #endif
 
-    sumhPort = openSerialPort(portConfig->identifier, FUNCTION_RX_SERIAL, sumhDataReceive, SUMH_BAUDRATE, portShared ? MODE_RXTX : MODE_RX, SERIAL_NOT_INVERTED);
+    sumhPort = openSerialPort(portConfig->identifier, FUNCTION_RX_SERIAL, sumhDataReceive, NULL, SUMH_BAUDRATE, portShared ? MODE_RXTX : MODE_RX, (rxConfig->serialrx_inverted ? SERIAL_INVERTED : 0));
 
-#ifdef TELEMETRY
+#ifdef USE_TELEMETRY
     if (portShared) {
         telemetrySharedPort = sumhPort;
     }

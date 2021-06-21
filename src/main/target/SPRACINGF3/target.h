@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
@@ -23,58 +26,52 @@
 #define TARGET_BOARD_IDENTIFIER "ZCF3"
 #elif defined(FLIP32F3OSD)
 #define TARGET_BOARD_IDENTIFIER "FLF3"
+#elif defined(IRCSYNERGYF3)
+#define TARGET_BOARD_IDENTIFIER "ISF3"
 #else
 #define TARGET_BOARD_IDENTIFIER "SRF3"
 #endif
 
 #if defined(ZCOREF3)
-#define CONFIG_FASTLOOP_PREFERRED_ACC ACC_DEFAULT
 
-#define LED0                    PB8
+#define LED0_PIN                PB8
 #else
-#define CONFIG_FASTLOOP_PREFERRED_ACC ACC_NONE
 
-#define LED0                    PB3
+#define LED0_PIN                PB3
 #endif
 
-#if defined(ZCOREF3)
-#define EXTI15_10_CALLBACK_HANDLER_COUNT 1
-#elif defined(FLIP32F3OSD)
-#define EXTI_CALLBACK_HANDLER_COUNT 2 // MPU data ready and MAG data ready
-#endif
-
-#define BEEPER                  PC15
+#if !defined(IRCSYNERGYF3)
+#define USE_BEEPER
+#define BEEPER_PIN              PC15
 #define BEEPER_INVERTED
+#endif
 
 #define USE_EXTI
-#define MPU_INT_EXTI            PC13
+#define USE_GYRO_EXTI
+#define GYRO_1_EXTI_PIN          PC13
 #define USE_MPU_DATA_READY_SIGNAL
 #define ENSURE_MPU_DATA_READY_IS_LOW
 
-#define GYRO
+#define USE_GYRO
 
-#define ACC
+#define USE_ACC
 
-#define BARO
+#define USE_BARO
 #define USE_BARO_BMP280
 
 #if defined(FLIP32F3OSD)
 #define USE_GYRO_MPU6500
-#define GYRO_MPU6500_ALIGN CW270_DEG
+#define GYRO_1_ALIGN            CW270_DEG
 
 #define USE_ACC_MPU6500
-#define ACC_MPU6500_ALIGN CW270_DEG
 
 #elif defined(ZCOREF3)
-#define GYRO
 #define USE_GYRO_MPU6500
 #define USE_GYRO_SPI_MPU6500
-#define GYRO_MPU6500_ALIGN      CW180_DEG
+#define GYRO_1_ALIGN            CW180_DEG
 
-#define ACC
 #define USE_ACC_MPU6500
 #define USE_ACC_SPI_MPU6500
-#define ACC_MPU6500_ALIGN       CW180_DEG
 
 #define USE_SPI_DEVICE_1 // PB9,3,4,5 on AF5 SPI1 (MPU)
 
@@ -83,24 +80,29 @@
 #define SPI1_MISO_PIN           PB4
 #define SPI1_MOSI_PIN           PB5
 
-#define MPU6500_CS_PIN          PB9
-#define MPU6500_SPI_INSTANCE    SPI1
+#define GYRO_1_CS_PIN           PB9
+#define GYRO_1_SPI_INSTANCE     SPI1
 
+#elif defined(IRCSYNERGYF3)
+#define USE_GYRO_SPI_MPU6000
+#define GYRO_1_ALIGN            CW270_DEG
+
+#define USE_ACC_SPI_MPU6000
+
+#define GYRO_1_CS_PIN           PB12
+#define GYRO_1_SPI_INSTANCE     SPI2
 #else
 #define USE_GYRO_MPU6050
-#define GYRO_MPU6050_ALIGN      CW270_DEG
+#define GYRO_1_ALIGN            CW270_DEG
 
 #define USE_ACC_MPU6050
-#define ACC_MPU6050_ALIGN       CW270_DEG
 #endif
 
-#if defined(SPRACINGF3) || defined(FLIP32F3OSD)
-#define SONAR
-#define SONAR_TRIGGER_PIN       PB0
-#define SONAR_ECHO_PIN          PB1
-
-#elif defined(RMDO)
-#undef USE_GPS
+#if defined(FLIP32F3OSD)
+#define USE_RANGEFINDER
+#define USE_RANGEFINDER_HCSR04
+#define RANGEFINDER_HCSR04_TRIGGER_PIN       PB0
+#define RANGEFINDER_HCSR04_ECHO_PIN          PB1
 
 #elif defined(ZCOREF3)
 #define USE_MAG_DATA_READY_SIGNAL
@@ -108,16 +110,18 @@
 
 #else //SPRACINGF3
 
-#define SONAR
-#define SONAR_TRIGGER_PIN       PB0
-#define SONAR_ECHO_PIN          PB1
+#define USE_RANGEFINDER
+#define USE_RANGEFINDER_HCSR04
+#define RANGEFINDER_HCSR04_TRIGGER_PIN       PB0
+#define RANGEFINDER_HCSR04_ECHO_PIN          PB1
 
 #define USE_BARO_MS5611
 #define USE_BARO_BMP085
 
-#define MAG
+#define USE_MAG
 #define USE_MAG_AK8975
 #define USE_MAG_HMC5883
+#define USE_MAG_QMC5883
 #define MAG_HMC5883_ALIGN       CW270_DEG
 
 #define USE_MAG_DATA_READY_SIGNAL
@@ -125,8 +129,10 @@
 #define MAG_INT_EXTI            PC14
 #endif
 
+#if !defined(IRCSYNERGYF3)
 #define USE_FLASHFS
 #define USE_FLASH_M25P16
+#endif
 
 #define USE_UART1
 #define USE_UART2
@@ -142,12 +148,10 @@
 
 #define SOFTSERIAL2_RX_PIN      PB0 // PWM 7
 #define SOFTSERIAL2_TX_PIN      PB1 // PWM 8
-
-#define SONAR_SOFTSERIAL2_EXCLUSIVE
 #endif
 
 #define USE_ESCSERIAL
-#define ESCSERIAL_TIMER_TX_HARDWARE 0 // PWM 1
+#define ESCSERIAL_TIMER_TX_PIN  PA0  // (HARDARE=0,PPM)
 
 #define UART1_TX_PIN            PA9
 #define UART1_RX_PIN            PA10
@@ -165,22 +169,25 @@
 #define USE_SPI
 #define USE_SPI_DEVICE_2 // PB12,13,14,15 on AF5
 
-#define M25P16_CS_PIN           PB12
-#define M25P16_SPI_INSTANCE     SPI2
+#if !defined(IRCSYNERGYF3)
+#define FLASH_CS_PIN            PB12
+#define FLASH_SPI_INSTANCE      SPI2
 
-#define BOARD_HAS_VOLTAGE_DIVIDER
-#define BOARD_HAS_CURRENT_SENSOR
+#define DEFAULT_VOLTAGE_METER_SOURCE VOLTAGE_METER_ADC
+#define DEFAULT_CURRENT_METER_SOURCE CURRENT_METER_ADC
 #define USE_ADC
 #define ADC_INSTANCE            ADC2
 #define VBAT_ADC_PIN            PA4
 #define CURRENT_METER_ADC_PIN   PA5
 #define RSSI_ADC_PIN            PB2
 
-#define OSD
+#define USE_OSD
 #define USE_OSD_OVER_MSP_DISPLAYPORT
 #define USE_SLOW_MSP_DISPLAYPORT_RATE_WHEN_UNARMED
+#endif
 
-#define USE_ESC_SENSOR
+#define USE_MSP_CURRENT_METER
+
 #define REMAP_TIM17_DMA
 
 // UART1 TX uses DMA1_Channel4, which is also used by dshot on motor 4
@@ -188,14 +195,12 @@
 #undef USE_UART1_TX_DMA
 #endif
 
+#if !defined(IRCSYNERGYF3)
 #define ENABLE_BLACKBOX_LOGGING_ON_SPIFLASH_BY_DEFAULT
 
 #define DEFAULT_RX_FEATURE      FEATURE_RX_PPM
-#define DEFAULT_FEATURES        (FEATURE_TRANSPONDER  | FEATURE_RSSI_ADC | FEATURE_TELEMETRY)
-
-#define SPEKTRUM_BIND_PIN       UART3_RX_PIN
-
-#define USE_SERIAL_4WAY_BLHELI_INTERFACE
+#define DEFAULT_FEATURES        (FEATURE_RSSI_ADC | FEATURE_TELEMETRY)
+#endif
 
 // IO - stm32f303cc in 48pin package
 #define TARGET_IO_PORTA         0xffff

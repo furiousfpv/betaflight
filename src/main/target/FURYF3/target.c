@@ -1,23 +1,26 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdint.h>
 
-#include <platform.h>
+#include "platform.h"
 #include "drivers/io.h"
 
 #include "drivers/timer.h"
@@ -37,15 +40,15 @@ const timerHardware_t timerHardware[USABLE_TIMER_CHANNEL_COUNT] = {
 
     { TIM1,   IO_TAG(PA8),  TIM_Channel_1, TIM_USE_LED,   1, GPIO_AF_6,  DMA1_Channel2, DMA1_CH2_HANDLER }, // GPIO TIMER - LED_STRIP
 */
-    DEF_TIM(TIM2,  CH2, PB3, TIM_USE_PPM,   TIMER_INPUT_ENABLED ), // PPM IN
-    DEF_TIM(TIM3,  CH3, PB0, TIM_USE_PWM,   TIMER_OUTPUT_ENABLED), // SS1 - PB0  - *TIM3_CH3, TIM1_CH2N, TIM8_CH2N
-    DEF_TIM(TIM3,  CH4, PB1, TIM_USE_PWM,   TIMER_OUTPUT_ENABLED), // SS1 - PB1  - *TIM3_CH4, TIM1_CH3N, TIM8_CH3N
+    DEF_TIM(TIM2,  CH2, PB3, TIM_USE_PPM,   0), // PPM IN
+    DEF_TIM(TIM3,  CH3, PB0, TIM_USE_PWM,   0), // SS1 - PB0  - *TIM3_CH3, TIM1_CH2N, TIM8_CH2N
+    DEF_TIM(TIM3,  CH4, PB1, TIM_USE_PWM,   0), // SS1 - PB1  - *TIM3_CH4, TIM1_CH3N, TIM8_CH3N
 
-    DEF_TIM(TIM4,  CH2, PB7, TIM_USE_MOTOR, TIMER_OUTPUT_ENABLED), // PWM4 - S1
-    DEF_TIM(TIM8,  CH1, PB6, TIM_USE_MOTOR, TIMER_OUTPUT_ENABLED), // PWM5 - S2
-    DEF_TIM(TIM17, CH1, PB5, TIM_USE_MOTOR, TIMER_OUTPUT_ENABLED), // PWM6 - S3
-    DEF_TIM(TIM16, CH1, PB4, TIM_USE_MOTOR, TIMER_OUTPUT_ENABLED), // PWM7 - S4
+    DEF_TIM(TIM4,  CH2, PB7, TIM_USE_MOTOR, 0), // PWM4 - S1
+    DEF_TIM(TIM8,  CH1, PB6, TIM_USE_MOTOR, 0), // PWM5 - S2
+    DEF_TIM(TIM17, CH1, PB5, TIM_USE_MOTOR, 0), // PWM6 - S3
+    DEF_TIM(TIM16, CH1, PB4, TIM_USE_MOTOR, 0), // PWM7 - S4
 
-    DEF_TIM(TIM1,  CH1, PA8, TIM_USE_LED,   TIMER_OUTPUT_ENABLED), // GPIO TIMER - LED_STRIP
+    DEF_TIM(TIM1,  CH1, PA8, TIM_USE_LED,   0), // GPIO TIMER - LED_STRIP
 
 };

@@ -1,18 +1,24 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+/*
  * Author: 4712
  * have a look at https://github.com/sim-/tgy/blob/master/boot.inc
  * for info about the stk500v2 implementation
@@ -23,18 +29,17 @@
 
 #include "platform.h"
 
-#ifdef  USE_SERIAL_4WAY_BLHELI_INTERFACE
+#if defined(USE_SERIAL_4WAY_BLHELI_INTERFACE) && defined(USE_SERIAL_4WAY_SK_BOOTLOADER)
 
 #include "drivers/io.h"
 #include "drivers/serial.h"
-#include "drivers/system.h"
+#include "drivers/time.h"
 
 #include "io/serial.h"
 #include "io/serial_4way.h"
 #include "io/serial_4way_impl.h"
 #include "io/serial_4way_stk500v2.h"
 
-#ifdef USE_SERIAL_4WAY_SK_BOOTLOADER
 
 #define BIT_LO_US (32) //32uS
 #define BIT_HI_US (2*BIT_LO_US)
@@ -176,9 +181,9 @@ static uint8_t StkReadLeader(void)
     // Wait for the first bit
     uint32_t waitcycl; //250uS each
 
-    if((StkCmd == CMD_PROGRAM_EEPROM_ISP) || (StkCmd == CMD_CHIP_ERASE_ISP)) {
+    if ((StkCmd == CMD_PROGRAM_EEPROM_ISP) || (StkCmd == CMD_CHIP_ERASE_ISP)) {
          waitcycl = STK_WAITCYLCES_EXT;
-    } else if(StkCmd == CMD_SIGN_ON) {
+    } else if (StkCmd == CMD_SIGN_ON) {
         waitcycl = STK_WAITCYLCES_START;
     } else {
         waitcycl= STK_WAITCYLCES;
@@ -189,7 +194,7 @@ static uint8_t StkReadLeader(void)
     }
 
     //Skip the first bits
-    if (waitcycl == 0){
+    if (waitcycl == 0) {
         goto timeout;
     }
 
@@ -271,7 +276,7 @@ static uint8_t _CMD_LOAD_ADDRESS(ioMem_t *pMem)
 {
     // ignore 0xFFFF
     // assume address is set before and we read or write the immediately following package
-    if((pMem->D_FLASH_ADDR_H == 0xFF) && (pMem->D_FLASH_ADDR_L == 0xFF)) return 1;
+    if ((pMem->D_FLASH_ADDR_H == 0xFF) && (pMem->D_FLASH_ADDR_L == 0xFF)) return 1;
     StkCmd = CMD_LOAD_ADDRESS;
     StkSendPacketHeader();
     StkSendByte(0); // hi byte Msg len
@@ -419,5 +424,4 @@ uint8_t Stk_WriteEEprom(ioMem_t *pMem)
     }
     return 0;
 }
-#endif
 #endif

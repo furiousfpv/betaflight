@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -21,51 +24,32 @@
 #include <math.h>
 
 #include "platform.h"
-#include "drivers/system.h"
+
+#ifdef USE_PWM_OUTPUT
 
 #include "drivers/io.h"
-#include "pwm_output.h"
-#include "timer.h"
+#include "drivers/motor.h"
 #include "drivers/pwm_output.h"
+#include "drivers/time.h"
+#include "drivers/timer.h"
 
-#define MULTISHOT_5US_PW    (MULTISHOT_TIMER_MHZ * 5)
-#define MULTISHOT_20US_MULT (MULTISHOT_TIMER_MHZ * 20 / 1000.0f)
+#include "pg/motor.h"
 
-#define DSHOT_MAX_COMMAND 47
-
-static pwmWriteFuncPtr pwmWritePtr;
-static pwmOutputPort_t motors[MAX_SUPPORTED_MOTORS];
-static pwmCompleteWriteFuncPtr pwmCompleteWritePtr = NULL;
-
-#ifdef USE_SERVOS
-static pwmOutputPort_t servos[MAX_SUPPORTED_SERVOS];
-#endif
-
-#ifdef BEEPER
-static pwmOutputPort_t beeperPwm;
-static uint16_t freqBeep=0;
-#endif
-
-bool pwmMotorsEnabled = false;
+FAST_DATA_ZERO_INIT pwmOutputPort_t motors[MAX_SUPPORTED_MOTORS];
 
 static void pwmOCConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t value, uint8_t output)
 {
 #if defined(USE_HAL_DRIVER)
     TIM_HandleTypeDef* Handle = timerFindTimerHandle(tim);
-    if(Handle == NULL) return;
+    if (Handle == NULL) return;
 
     TIM_OC_InitTypeDef TIM_OCInitStructure;
 
     TIM_OCInitStructure.OCMode = TIM_OCMODE_PWM1;
-
-    if (output & TIMER_OUTPUT_N_CHANNEL) {
-        TIM_OCInitStructure.OCNIdleState = TIM_OCNIDLESTATE_RESET;
-        TIM_OCInitStructure.OCNPolarity = (output & TIMER_OUTPUT_INVERTED) ? TIM_OCNPOLARITY_HIGH : TIM_OCNPOLARITY_LOW;
-    } else {
-        TIM_OCInitStructure.OCIdleState = TIM_OCIDLESTATE_SET;
-        TIM_OCInitStructure.OCPolarity =  (output & TIMER_OUTPUT_INVERTED) ? TIM_OCPOLARITY_LOW : TIM_OCPOLARITY_HIGH;
-    }
-
+    TIM_OCInitStructure.OCIdleState = TIM_OCIDLESTATE_SET;
+    TIM_OCInitStructure.OCPolarity = (output & TIMER_OUTPUT_INVERTED) ? TIM_OCPOLARITY_LOW : TIM_OCPOLARITY_HIGH;
+    TIM_OCInitStructure.OCNIdleState = TIM_OCNIDLESTATE_SET;
+    TIM_OCInitStructure.OCNPolarity = (output & TIMER_OUTPUT_INVERTED) ? TIM_OCNPOLARITY_LOW : TIM_OCNPOLARITY_HIGH;
     TIM_OCInitStructure.Pulse = value;
     TIM_OCInitStructure.OCFastMode = TIM_OCFAST_DISABLE;
 
@@ -79,7 +63,7 @@ static void pwmOCConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t value, uint8
     if (output & TIMER_OUTPUT_N_CHANNEL) {
         TIM_OCInitStructure.TIM_OutputNState = TIM_OutputNState_Enable;
         TIM_OCInitStructure.TIM_OCNIdleState = TIM_OCNIdleState_Reset;
-        TIM_OCInitStructure.TIM_OCNPolarity = (output & TIMER_OUTPUT_INVERTED) ? TIM_OCNPolarity_High : TIM_OCNPolarity_Low;
+        TIM_OCInitStructure.TIM_OCNPolarity = (output & TIMER_OUTPUT_INVERTED) ? TIM_OCNPolarity_Low : TIM_OCNPolarity_High;
     } else {
         TIM_OCInitStructure.TIM_OutputState = TIM_OutputState_Enable;
         TIM_OCInitStructure.TIM_OCIdleState = TIM_OCIdleState_Set;
@@ -92,19 +76,22 @@ static void pwmOCConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t value, uint8
 #endif
 }
 
-static void pwmOutConfig(pwmOutputPort_t *port, const timerHardware_t *timerHardware, uint8_t mhz, uint16_t period, uint16_t value, uint8_t inversion)
+void pwmOutConfig(timerChannel_t *channel, const timerHardware_t *timerHardware, uint32_t hz, uint16_t period, uint16_t value, uint8_t inversion)
 {
 #if defined(USE_HAL_DRIVER)
     TIM_HandleTypeDef* Handle = timerFindTimerHandle(timerHardware->tim);
-    if(Handle == NULL) return;
+    if (Handle == NULL) return;
 #endif
 
-    configTimeBase(timerHardware->tim, period, mhz);
-    pwmOCConfig(timerHardware->tim, timerHardware->channel, value,
-        inversion ? timerHardware->output ^ TIMER_OUTPUT_INVERTED : timerHardware->output);
+    configTimeBase(timerHardware->tim, period, hz);
+    pwmOCConfig(timerHardware->tim,
+        timerHardware->channel,
+        value,
+        inversion ? timerHardware->output ^ TIMER_OUTPUT_INVERTED : timerHardware->output
+        );
 
 #if defined(USE_HAL_DRIVER)
-    if(timerHardware->output & TIMER_OUTPUT_N_CHANNEL)
+    if (timerHardware->output & TIMER_OUTPUT_N_CHANNEL)
         HAL_TIMEx_PWMN_Start(Handle, timerHardware->channel);
     else
         HAL_TIM_PWM_Start(Handle, timerHardware->channel);
@@ -114,188 +101,168 @@ static void pwmOutConfig(pwmOutputPort_t *port, const timerHardware_t *timerHard
     TIM_Cmd(timerHardware->tim, ENABLE);
 #endif
 
-    port->ccr = timerChCCR(timerHardware);
-    port->period = period;
-    port->tim = timerHardware->tim;
+    channel->ccr = timerChCCR(timerHardware);
 
-    *port->ccr = 0;
+    channel->tim = timerHardware->tim;
+
+    *channel->ccr = 0;
 }
 
-static void pwmWriteUnused(uint8_t index, uint16_t value)
+static FAST_DATA_ZERO_INIT motorDevice_t motorPwmDevice;
+
+static void pwmWriteUnused(uint8_t index, float value)
 {
     UNUSED(index);
     UNUSED(value);
 }
 
-static void pwmWriteBrushed(uint8_t index, uint16_t value)
+static void pwmWriteStandard(uint8_t index, float value)
 {
-    *motors[index].ccr = (value - 1000) * motors[index].period / 1000;
+    /* TODO: move value to be a number between 0-1 (i.e. percent throttle from mixer) */
+    *motors[index].channel.ccr = lrintf((value * motors[index].pulseScale) + motors[index].pulseOffset);
 }
 
-static void pwmWriteStandard(uint8_t index, uint16_t value)
+void pwmShutdownPulsesForAllMotors(void)
 {
-    *motors[index].ccr = value;
-}
-
-static void pwmWriteOneShot125(uint8_t index, uint16_t value)
-{
-    *motors[index].ccr = lrintf((float)(value * ONESHOT125_TIMER_MHZ/8.0f));
-}
-
-static void pwmWriteOneShot42(uint8_t index, uint16_t value)
-{
-    *motors[index].ccr = lrintf((float)(value * ONESHOT42_TIMER_MHZ/24.0f));
-}
-
-static void pwmWriteMultiShot(uint8_t index, uint16_t value)
-{
-    *motors[index].ccr = lrintf(((float)(value-1000) * MULTISHOT_20US_MULT) + MULTISHOT_5US_PW);
-}
-
-void pwmWriteMotor(uint8_t index, uint16_t value)
-{
-    pwmWritePtr(index, value);
-}
-
-void pwmShutdownPulsesForAllMotors(uint8_t motorCount)
-{
-    for (int index = 0; index < motorCount; index++) {
+    for (int index = 0; index < motorPwmDevice.count; index++) {
         // Set the compare register to 0, which stops the output pulsing if the timer overflows
-        if (motors[index].ccr) {
-            *motors[index].ccr = 0;
+        if (motors[index].channel.ccr) {
+            *motors[index].channel.ccr = 0;
         }
     }
 }
 
 void pwmDisableMotors(void)
 {
-    pwmShutdownPulsesForAllMotors(MAX_SUPPORTED_MOTORS);
-    pwmMotorsEnabled = false;
+    pwmShutdownPulsesForAllMotors();
 }
 
-void pwmEnableMotors(void)
+static motorVTable_t motorPwmVTable;
+bool pwmEnableMotors(void)
 {
     /* check motors can be enabled */
-    pwmMotorsEnabled = (pwmWritePtr != pwmWriteUnused);
+    return (motorPwmVTable.write != &pwmWriteUnused);
 }
 
-bool pwmAreMotorsEnabled(void)
+bool pwmIsMotorEnabled(uint8_t index)
 {
-    return pwmMotorsEnabled;
+    return motors[index].enabled;
 }
 
-static void pwmCompleteWriteUnused(uint8_t motorCount)
+static void pwmCompleteOneshotMotorUpdate(void)
 {
-    UNUSED(motorCount);    
-}
-
-static void pwmCompleteOneshotMotorUpdate(uint8_t motorCount)
-{
-    for (int index = 0; index < motorCount; index++) {
+    for (int index = 0; index < motorPwmDevice.count; index++) {
         if (motors[index].forceOverflow) {
-            timerForceOverflow(motors[index].tim);
+            timerForceOverflow(motors[index].channel.tim);
         }
         // Set the compare register to 0, which stops the output pulsing if the timer overflows before the main loop completes again.
         // This compare register will be set to the output value on the next main loop.
-        *motors[index].ccr = 0;
+        *motors[index].channel.ccr = 0;
     }
 }
 
-void pwmCompleteMotorUpdate(uint8_t motorCount)
+static float pwmConvertFromExternal(uint16_t externalValue)
 {
-    pwmCompleteWritePtr(motorCount);
+    return (float)externalValue;
 }
 
-void motorDevInit(const motorDevConfig_t *motorConfig, uint16_t idlePulse, uint8_t motorCount)
+static uint16_t pwmConvertToExternal(float motorValue)
 {
-    memset(motors, 0, sizeof(motors));
-    
-    uint32_t timerMhzCounter = 0;
-    bool useUnsyncedPwm = motorConfig->useUnsyncedPwm;
-    bool isDigital = false;
+    return (uint16_t)motorValue;
+}
 
+static motorVTable_t motorPwmVTable = {
+    .postInit = motorPostInitNull,
+    .enable = pwmEnableMotors,
+    .disable = pwmDisableMotors,
+    .isMotorEnabled = pwmIsMotorEnabled,
+    .shutdown = pwmShutdownPulsesForAllMotors,
+    .convertExternalToMotor = pwmConvertFromExternal,
+    .convertMotorToExternal = pwmConvertToExternal,
+};
+
+motorDevice_t *motorPwmDevInit(const motorDevConfig_t *motorConfig, uint16_t idlePulse, uint8_t motorCount, bool useUnsyncedPwm)
+{
+    motorPwmDevice.vTable = motorPwmVTable;
+
+    float sMin = 0;
+    float sLen = 0;
     switch (motorConfig->motorPwmProtocol) {
     default:
     case PWM_TYPE_ONESHOT125:
-        timerMhzCounter = ONESHOT125_TIMER_MHZ;
-        pwmWritePtr = pwmWriteOneShot125;
+        sMin = 125e-6f;
+        sLen = 125e-6f;
         break;
     case PWM_TYPE_ONESHOT42:
-        timerMhzCounter = ONESHOT42_TIMER_MHZ;
-        pwmWritePtr = pwmWriteOneShot42;
+        sMin = 42e-6f;
+        sLen = 42e-6f;
         break;
     case PWM_TYPE_MULTISHOT:
-        timerMhzCounter = MULTISHOT_TIMER_MHZ;
-        pwmWritePtr = pwmWriteMultiShot;
+        sMin = 5e-6f;
+        sLen = 20e-6f;
         break;
     case PWM_TYPE_BRUSHED:
-        timerMhzCounter = PWM_BRUSHED_TIMER_MHZ;
-        pwmWritePtr = pwmWriteBrushed;
+        sMin = 0;
         useUnsyncedPwm = true;
         idlePulse = 0;
         break;
     case PWM_TYPE_STANDARD:
-        timerMhzCounter = PWM_TIMER_MHZ;
-        pwmWritePtr = pwmWriteStandard;
+        sMin = 1e-3f;
+        sLen = 1e-3f;
         useUnsyncedPwm = true;
         idlePulse = 0;
         break;
-#ifdef USE_DSHOT
-    case PWM_TYPE_DSHOT1200:
-    case PWM_TYPE_DSHOT600:
-    case PWM_TYPE_DSHOT300:
-    case PWM_TYPE_DSHOT150:
-        pwmWritePtr = pwmWriteDigital;
-        pwmCompleteWritePtr = pwmCompleteDigitalMotorUpdate;
-        isDigital = true;
-        break;
-#endif
     }
 
-    if (!isDigital) {
-        pwmCompleteWritePtr = useUnsyncedPwm ? pwmCompleteWriteUnused : pwmCompleteOneshotMotorUpdate;
-    }
+    motorPwmDevice.vTable.write = pwmWriteStandard;
+    motorPwmDevice.vTable.updateStart = motorUpdateStartNull;
+    motorPwmDevice.vTable.updateComplete = useUnsyncedPwm ? motorUpdateCompleteNull : pwmCompleteOneshotMotorUpdate;
 
     for (int motorIndex = 0; motorIndex < MAX_SUPPORTED_MOTORS && motorIndex < motorCount; motorIndex++) {
-        const ioTag_t tag = motorConfig->ioTags[motorIndex];
-        const timerHardware_t *timerHardware = timerGetByTag(tag, TIM_USE_ANY);
+        const unsigned reorderedMotorIndex = motorConfig->motorOutputReordering[motorIndex];
+        const ioTag_t tag = motorConfig->ioTags[reorderedMotorIndex];
+        const timerHardware_t *timerHardware = timerAllocate(tag, OWNER_MOTOR, RESOURCE_INDEX(reorderedMotorIndex));
 
         if (timerHardware == NULL) {
             /* not enough motors initialised for the mixer or a break in the motors */
-            pwmWritePtr = pwmWriteUnused;
-            pwmCompleteWritePtr = pwmCompleteWriteUnused;
+            motorPwmDevice.vTable.write = &pwmWriteUnused;
+            motorPwmDevice.vTable.updateComplete = motorUpdateCompleteNull;
             /* TODO: block arming and add reason system cannot arm */
-            return;
+            return NULL;
         }
 
         motors[motorIndex].io = IOGetByTag(tag);
+        IOInit(motors[motorIndex].io, OWNER_MOTOR, RESOURCE_INDEX(reorderedMotorIndex));
 
-#ifdef USE_DSHOT
-        if (isDigital) {
-            pwmDigitalMotorHardwareConfig(timerHardware, motorIndex, motorConfig->motorPwmProtocol,
-                motorConfig->motorPwmInversion ? timerHardware->output ^ TIMER_OUTPUT_INVERTED : timerHardware->output);
-            motors[motorIndex].enabled = true;
-            continue;
-        }
-#endif
-
-        IOInit(motors[motorIndex].io, OWNER_MOTOR, RESOURCE_INDEX(motorIndex));
-#if defined(USE_HAL_DRIVER)
-        IOConfigGPIOAF(motors[motorIndex].io, IOCFG_AF_PP, timerHardware->alternateFunction);
-#else
+#if defined(STM32F1)
         IOConfigGPIO(motors[motorIndex].io, IOCFG_AF_PP);
+#else
+        IOConfigGPIOAF(motors[motorIndex].io, IOCFG_AF_PP, timerHardware->alternateFunction);
 #endif
 
-        if (useUnsyncedPwm) {
-            const uint32_t hz = timerMhzCounter * 1000000;
-            pwmOutConfig(&motors[motorIndex], timerHardware, timerMhzCounter, hz / motorConfig->motorPwmRate, idlePulse, motorConfig->motorPwmInversion);
-        } else {
-            pwmOutConfig(&motors[motorIndex], timerHardware, timerMhzCounter, 0xFFFF, 0, motorConfig->motorPwmInversion);
-        }
+        /* standard PWM outputs */
+        // margin of safety is 4 periods when unsynced
+        const unsigned pwmRateHz = useUnsyncedPwm ? motorConfig->motorPwmRate : ceilf(1 / ((sMin + sLen) * 4));
+
+        const uint32_t clock = timerClock(timerHardware->tim);
+        /* used to find the desired timer frequency for max resolution */
+        const unsigned prescaler = ((clock / pwmRateHz) + 0xffff) / 0x10000; /* rounding up */
+        const uint32_t hz = clock / prescaler;
+        const unsigned period = useUnsyncedPwm ? hz / pwmRateHz : 0xffff;
+
+        /*
+            if brushed then it is the entire length of the period.
+            TODO: this can be moved back to periodMin and periodLen
+            once mixer outputs a 0..1 float value.
+        */
+        motors[motorIndex].pulseScale = ((motorConfig->motorPwmProtocol == PWM_TYPE_BRUSHED) ? period : (sLen * hz)) / 1000.0f;
+        motors[motorIndex].pulseOffset = (sMin * hz) - (motors[motorIndex].pulseScale * 1000);
+
+        pwmOutConfig(&motors[motorIndex].channel, timerHardware, hz, period, idlePulse, motorConfig->motorPwmInversion);
 
         bool timerAlreadyUsed = false;
         for (int i = 0; i < motorIndex; i++) {
-            if (motors[i].tim == motors[motorIndex].tim) {
+            if (motors[i].channel.tim == motors[motorIndex].channel.tim) {
                 timerAlreadyUsed = true;
                 break;
             }
@@ -304,7 +271,7 @@ void motorDevInit(const motorDevConfig_t *motorConfig, uint16_t idlePulse, uint8
         motors[motorIndex].enabled = true;
     }
 
-    pwmMotorsEnabled = true;
+    return &motorPwmDevice;
 }
 
 pwmOutputPort_t *pwmGetMotors(void)
@@ -312,49 +279,13 @@ pwmOutputPort_t *pwmGetMotors(void)
     return motors;
 }
 
-#ifdef USE_DSHOT
-uint32_t getDshotHz(motorPwmProtocolTypes_e pwmProtocolType)
-{
-    switch (pwmProtocolType) {
-        case(PWM_TYPE_DSHOT1200):
-            return MOTOR_DSHOT1200_MHZ * 1000000;
-        case(PWM_TYPE_DSHOT600):
-            return MOTOR_DSHOT600_MHZ * 1000000;
-        case(PWM_TYPE_DSHOT300):
-            return MOTOR_DSHOT300_MHZ * 1000000;
-        default:
-        case(PWM_TYPE_DSHOT150):
-            return MOTOR_DSHOT150_MHZ * 1000000;
-    }
-}
-
-void pwmWriteDshotCommand(uint8_t index, uint8_t command)
-{
-    if (command <= DSHOT_MAX_COMMAND) {
-        motorDmaOutput_t *const motor = getMotorDmaOutput(index);
-
-        unsigned repeats;
-        if ((command >= 7 && command <= 10) || command == 12) {
-            repeats = 10;
-        } else {
-            repeats = 1;
-        }
-        for (; repeats; repeats--) {
-            motor->requestTelemetry = true;
-            pwmWritePtr(index, command);
-            pwmCompleteMotorUpdate(0);
-
-            delay(1);
-        }
-    }
-}
-#endif
-
 #ifdef USE_SERVOS
-void pwmWriteServo(uint8_t index, uint16_t value)
+static pwmOutputPort_t servos[MAX_SUPPORTED_SERVOS];
+
+void pwmWriteServo(uint8_t index, float value)
 {
-    if (index < MAX_SUPPORTED_SERVOS && servos[index].ccr) {
-        *servos[index].ccr = value;
+    if (index < MAX_SUPPORTED_SERVOS && servos[index].channel.ccr) {
+        *servos[index].channel.ccr = lrintf(value);
     }
 }
 
@@ -371,60 +302,22 @@ void servoDevInit(const servoDevConfig_t *servoConfig)
 
         IOInit(servos[servoIndex].io, OWNER_SERVO, RESOURCE_INDEX(servoIndex));
 
-        const timerHardware_t *timer = timerGetByTag(tag, TIM_USE_ANY);
-#if defined(USE_HAL_DRIVER)
-        IOConfigGPIOAF(servos[servoIndex].io, IOCFG_AF_PP, timer->alternateFunction);
-#else
-        IOConfigGPIO(servos[servoIndex].io, IOCFG_AF_PP);
-#endif
+        const timerHardware_t *timer = timerAllocate(tag, OWNER_SERVO, RESOURCE_INDEX(servoIndex));
 
         if (timer == NULL) {
             /* flag failure and disable ability to arm */
             break;
         }
 
-        pwmOutConfig(&servos[servoIndex], timer, PWM_TIMER_MHZ, 1000000 / servoConfig->servoPwmRate, servoConfig->servoCenterPulse, 0);
+#if defined(STM32F1)
+        IOConfigGPIO(servos[servoIndex].io, IOCFG_AF_PP);
+#else
+        IOConfigGPIOAF(servos[servoIndex].io, IOCFG_AF_PP, timer->alternateFunction);
+#endif
+
+        pwmOutConfig(&servos[servoIndex].channel, timer, PWM_TIMER_1MHZ, PWM_TIMER_1MHZ / servoConfig->servoPwmRate, servoConfig->servoCenterPulse, 0);
         servos[servoIndex].enabled = true;
     }
 }
-
-#endif
-
-#ifdef BEEPER
-void pwmWriteBeeper(bool onoffBeep)
-{
-        if(!beeperPwm.io)
-            return;
-        if(onoffBeep == true) {
-            *beeperPwm.ccr = (1000000/freqBeep)/2;
-            beeperPwm.enabled = true;
-        } else {
-            *beeperPwm.ccr = 0;
-            beeperPwm.enabled = false;
-        }
-}
-
-void pwmToggleBeeper(void)
-{
-        pwmWriteBeeper(!beeperPwm.enabled);
-}
-
-void beeperPwmInit(IO_t io, uint16_t frequency)
-{
-        const ioTag_t tag=IO_TAG(BEEPER);
-        beeperPwm.io = io;
-        const timerHardware_t *timer = timerGetByTag(tag, TIM_USE_BEEPER);
-        if (beeperPwm.io && timer) {
-            IOInit(beeperPwm.io, OWNER_BEEPER, RESOURCE_INDEX(0));
-#if defined(USE_HAL_DRIVER)
-            IOConfigGPIOAF(beeperPwm.io, IOCFG_AF_PP, timer->alternateFunction);
-#else
-            IOConfigGPIO(beeperPwm.io, IOCFG_AF_PP);
-#endif
-            freqBeep = frequency;
-            pwmOutConfig(&beeperPwm, timer, PWM_TIMER_MHZ, 1000000/freqBeep, (1000000/freqBeep)/2,0);
-        }
-        *beeperPwm.ccr = 0;
-        beeperPwm.enabled = false;
-}
-#endif
+#endif // USE_SERVOS
+#endif // USE_PWM_OUTPUT

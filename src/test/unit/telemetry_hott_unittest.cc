@@ -29,8 +29,8 @@ extern "C" {
     #include "common/axis.h"
     #include "common/gps_conversion.h"
 
-    #include "config/parameter_group.h"
-    #include "config/parameter_group_ids.h"
+    #include "pg/pg.h"
+    #include "pg/pg_ids.h"
 
     #include "drivers/system.h"
     #include "drivers/serial.h"
@@ -171,11 +171,8 @@ uint16_t batteryWarningVoltage;
 uint8_t useHottAlarmSoundPeriod (void) { return 0; }
 
 
-uint8_t GPS_numSat;
-int32_t GPS_coord[2];
-uint16_t GPS_speed;                 // speed in 0.1m/s
+gpsSolutionData_t gpsSol;
 uint16_t GPS_distanceToHome;        // distance to home point in meters
-uint16_t GPS_altitude;              // altitude in 0.1m
 int16_t GPS_directionToHome;        // direction to home or hol point in degrees
 
 
@@ -183,8 +180,8 @@ uint32_t fixedMillis = 0;
 
 baro_t baro;
 
-uint32_t getEstimatedAltitude() { return 0; }
-uint32_t getEstimatedVario() { return 0; }
+int32_t getEstimatedAltitudeCm() { return 0; }
+int16_t getEstimatedVario() { return 0; }
 
 uint32_t millis(void) {
     return fixedMillis;
@@ -216,18 +213,19 @@ void serialWrite(serialPort_t *instance, uint8_t ch)
     UNUSED(ch);
 }
 
-void serialSetMode(serialPort_t *instance, portMode_t mode)
+void serialSetMode(serialPort_t *instance, portMode_e mode)
 {
     UNUSED(instance);
     UNUSED(mode);
 }
 
-serialPort_t *openSerialPort(serialPortIdentifier_e identifier, serialPortFunction_e functionMask, serialReceiveCallbackPtr callback, uint32_t baudRate, portMode_t mode, portOptions_t options)
+serialPort_t *openSerialPort(serialPortIdentifier_e identifier, serialPortFunction_e functionMask, serialReceiveCallbackPtr callback, void *callbackData, uint32_t baudRate, portMode_e mode, portOptions_e options)
 {
     UNUSED(identifier);
     UNUSED(functionMask);
     UNUSED(baudRate);
     UNUSED(callback);
+    UNUSED(callbackData);
     UNUSED(mode);
     UNUSED(options);
 
@@ -239,7 +237,7 @@ void closeSerialPort(serialPort_t *serialPort)
     UNUSED(serialPort);
 }
 
-serialPortConfig_t *findSerialPortConfig(serialPortFunction_e function)
+const serialPortConfig_t *findSerialPortConfig(serialPortFunction_e function)
 {
     UNUSED(function);
 
@@ -257,6 +255,11 @@ bool telemetryDetermineEnabledState(portSharing_e)
     return true;
 }
 
+bool telemetryIsSensorEnabled(sensor_e sensor) {
+    UNUSED(sensor);
+    return true;
+}
+
 portSharing_e determinePortSharing(const serialPortConfig_t *, serialPortFunction_e)
 {
     return PORTSHARING_NOT_SHARED;
@@ -267,9 +270,24 @@ batteryState_e getBatteryState(void)
 	return BATTERY_OK;
 }
 
+batteryState_e getVoltageState(void)
+{
+	return BATTERY_OK;
+}
+	
+batteryState_e getConsumptionState(void)	
+{
+	return BATTERY_OK;
+}
+	
 uint16_t getBatteryVoltage(void)
 {
     return testBatteryVoltage;
+}
+
+uint16_t getLegacyBatteryVoltage(void)
+{
+    return (testBatteryVoltage + 5) / 10;
 }
 
 int32_t getAmperage(void) {

@@ -1,25 +1,33 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
-#include <stdbool.h>
-#include <stdint.h>
+#include "drivers/exti.h"
 
+#include "pg/rx.h"
+#include "pg/rx_spi.h"
+
+#include "rx/rx.h"
+
+// Used in MSP. Append at end.
 typedef enum {
     RX_SPI_NRF24_V202_250K = 0,
     RX_SPI_NRF24_V202_1M,
@@ -29,13 +37,25 @@ typedef enum {
     RX_SPI_NRF24_CX10A,
     RX_SPI_NRF24_H8_3D,
     RX_SPI_NRF24_INAV,
+    RX_SPI_FRSKY_D,
+    RX_SPI_FRSKY_X,
+    RX_SPI_A7105_FLYSKY,
+    RX_SPI_A7105_FLYSKY_2A,
+    RX_SPI_NRF24_KN,
+    RX_SPI_SFHSS,
+    RX_SPI_CYRF6936_DSM,
+    RX_SPI_FRSKY_X_LBT,
+    RX_SPI_REDPINE,
+    RX_SPI_FRSKY_X_V2,
+    RX_SPI_FRSKY_X_LBT_V2,
     RX_SPI_PROTOCOL_COUNT
 } rx_spi_protocol_e;
 
 typedef enum {
     RX_SPI_RECEIVED_NONE = 0,
-    RX_SPI_RECEIVED_BIND,
-    RX_SPI_RECEIVED_DATA
+    RX_SPI_RECEIVED_BIND = (1 << 0),
+    RX_SPI_RECEIVED_DATA = (1 << 1),
+    RX_SPI_ROCESSING_REQUIRED = (1 << 2),
 } rx_spi_received_e;
 
 // RC channels in AETR order
@@ -60,6 +80,11 @@ typedef enum {
     RC_SPI_AUX14
 } rc_spi_aetr_e;
 
+typedef struct {
+    ioConfig_t ioConfig;
+    extiTrigger_t trigger;
+} rxSpiExtiConfig_t;
+
 // RC channels as used by deviation
 #define RC_CHANNEL_RATE        RC_SPI_AUX1
 #define RC_CHANNEL_FLIP        RC_SPI_AUX2
@@ -68,4 +93,4 @@ typedef enum {
 #define RC_CHANNEL_HEADLESS    RC_SPI_AUX5
 #define RC_CHANNEL_RTH         RC_SPI_AUX6 // return to home
 
-bool rxSpiInit(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig);
+bool rxSpiInit(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState);

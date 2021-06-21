@@ -26,6 +26,9 @@
  */
 
 /* Includes ------------------------------------------------------------------*/
+
+#include "platform.h"
+
 #include "usb_lib.h"
 #include "usb_conf.h"
 #include "usb_pwr.h"
@@ -88,7 +91,7 @@ RESULT PowerOn(void)
  * Output         : None.
  * Return         : USB_SUCCESS.
  *******************************************************************************/
-RESULT PowerOff()
+RESULT PowerOff(void)
 {
     /* disable all interrupts and force USB reset */
     _SetCNTR(CNTR_FRES);

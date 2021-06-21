@@ -1,45 +1,53 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <platform.h>
+#include "platform.h"
 
-#ifdef USE_DSHOT
+#if defined(USE_ESC_SENSOR)
 
 #include "build/debug.h"
 
+#include "common/time.h"
+
 #include "config/feature.h"
-#include "config/parameter_group.h"
-#include "config/parameter_group_ids.h"
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
+#include "pg/motor.h"
 
 #include "common/maths.h"
 #include "common/utils.h"
 
-#include "drivers/pwm_output.h"
+#include "drivers/timer.h"
+#include "drivers/motor.h"
+#include "drivers/dshot.h"
+#include "drivers/dshot_dpwm.h"
 #include "drivers/serial.h"
 #include "drivers/serial_uart.h"
-#include "drivers/system.h"
 
 #include "esc_sensor.h"
 
-#include "fc/config.h"
+#include "config/config.h"
 
 #include "flight/mixer.h"
 
@@ -63,6 +71,12 @@ Byte 8: Rpm low byte
 Byte 9: 8-bit CRC
 
 */
+
+PG_REGISTER_WITH_RESET_TEMPLATE(escSensorConfig_t, escSensorConfig, PG_ESC_SENSOR_CONFIG, 0);
+
+PG_RESET_TEMPLATE(escSensorConfig_t, escSensorConfig,
+        .halfDuplex = 0
+);
 
 /*
 DEBUG INFORMATION
@@ -92,13 +106,15 @@ typedef enum {
 } escSensorTriggerState_t;
 
 #define ESC_SENSOR_BAUDRATE 115200
-#define ESC_SENSOR_BUFFSIZE 10
 #define ESC_BOOTTIME 5000               // 5 seconds
 #define ESC_REQUEST_TIMEOUT 100         // 100 ms (data transfer takes only 900us)
 
-static volatile bool tlmFramePending = false;
-static uint8_t tlm[ESC_SENSOR_BUFFSIZE] = { 0, };
-static uint8_t tlmFramePosition = 0;
+#define TELEMETRY_FRAME_SIZE 10
+static uint8_t telemetryBuffer[TELEMETRY_FRAME_SIZE] = { 0, };
+
+static volatile uint8_t *buffer;
+static volatile uint8_t bufferSize = 0;
+static volatile uint8_t bufferPosition = 0;
 
 static serialPort_t *escSensorPort = NULL;
 
@@ -114,6 +130,23 @@ static bool combinedDataNeedsUpdate = true;
 static uint16_t totalTimeoutCount = 0;
 static uint16_t totalCrcErrorCount = 0;
 
+void startEscDataRead(uint8_t *frameBuffer, uint8_t frameLength)
+{
+    buffer = frameBuffer;
+    bufferPosition = 0;
+    bufferSize = frameLength;
+}
+
+uint8_t getNumberEscBytesRead(void)
+{
+    return bufferPosition;
+}
+
+static bool isFrameComplete(void)
+{
+    return bufferPosition == bufferSize;
+}
+
 bool isEscSensorActive(void)
 {
     return escSensorPort != NULL;
@@ -121,6 +154,10 @@ bool isEscSensorActive(void)
 
 escSensorData_t *getEscSensorData(uint8_t motorNumber)
 {
+    if (!featureIsEnabled(FEATURE_ESC_SENSOR)) {
+        return NULL;
+    }
+
     if (motorNumber < getMotorCount()) {
         return &escSensorData[motorNumber];
     } else if (motorNumber == ESC_SENSOR_COMBINED) {
@@ -156,37 +193,31 @@ escSensorData_t *getEscSensorData(uint8_t motorNumber)
 }
 
 // Receive ISR callback
-static void escSensorDataReceive(uint16_t c)
+static void escSensorDataReceive(uint16_t c, void *data)
 {
+    UNUSED(data);
+
     // KISS ESC sends some data during startup, ignore this for now (maybe future use)
     // startup data could be firmware version and serialnumber
 
-    if (!tlmFramePending) {
+    if (isFrameComplete()) {
         return;
     }
 
-    tlm[tlmFramePosition] = (uint8_t)c;
-
-    if (tlmFramePosition == ESC_SENSOR_BUFFSIZE - 1) {
-        tlmFramePosition = 0;
-
-        tlmFramePending = false;
-    } else {
-        tlmFramePosition++;
-    }
+    buffer[bufferPosition++] = (uint8_t)c;
 }
 
 bool escSensorInit(void)
 {
-    serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_ESC_SENSOR);
+    const serialPortConfig_t *portConfig = findSerialPortConfig(FUNCTION_ESC_SENSOR);
     if (!portConfig) {
         return false;
     }
 
-    portOptions_t options = (SERIAL_NOT_INVERTED);
+    portOptions_e options = SERIAL_NOT_INVERTED  | (escSensorConfig()->halfDuplex ? SERIAL_BIDIR : 0);
 
     // Initialize serial port
-    escSensorPort = openSerialPort(portConfig->identifier, FUNCTION_ESC_SENSOR, escSensorDataReceive, ESC_SENSOR_BAUDRATE, MODE_RX, options);
+    escSensorPort = openSerialPort(portConfig->identifier, FUNCTION_ESC_SENSOR, escSensorDataReceive, NULL, ESC_SENSOR_BAUDRATE, MODE_RX, options);
 
     for (int i = 0; i < MAX_SUPPORTED_MOTORS; i = i + 1) {
         escSensorData[i].dataAge = ESC_DATA_INVALID;
@@ -195,7 +226,7 @@ bool escSensorInit(void)
     return escSensorPort != NULL;
 }
 
-static uint8_t update_crc8(uint8_t crc, uint8_t crc_seed)
+static uint8_t updateCrc8(uint8_t crc, uint8_t crc_seed)
 {
     uint8_t crc_u = crc;
     crc_u ^= crc_seed;
@@ -207,37 +238,42 @@ static uint8_t update_crc8(uint8_t crc, uint8_t crc_seed)
     return (crc_u);
 }
 
-static uint8_t get_crc8(uint8_t *Buf, uint8_t BufLen)
+uint8_t calculateCrc8(const uint8_t *Buf, const uint8_t BufLen)
 {
     uint8_t crc = 0;
-    for(int i=0; i<BufLen; i++) crc = update_crc8(Buf[i], crc);
-    return (crc);
+    for (int i = 0; i < BufLen; i++) {
+        crc = updateCrc8(Buf[i], crc);
+    }
+
+    return crc;
 }
 
 static uint8_t decodeEscFrame(void)
 {
-    if (tlmFramePending) {
+    if (!isFrameComplete()) {
         return ESC_SENSOR_FRAME_PENDING;
     }
 
     // Get CRC8 checksum
-    uint16_t chksum = get_crc8(tlm, ESC_SENSOR_BUFFSIZE - 1);
-    uint16_t tlmsum = tlm[ESC_SENSOR_BUFFSIZE - 1];     // last byte contains CRC value
+    uint16_t chksum = calculateCrc8(telemetryBuffer, TELEMETRY_FRAME_SIZE - 1);
+    uint16_t tlmsum = telemetryBuffer[TELEMETRY_FRAME_SIZE - 1];     // last byte contains CRC value
     uint8_t frameStatus;
     if (chksum == tlmsum) {
         escSensorData[escSensorMotor].dataAge = 0;
-        escSensorData[escSensorMotor].temperature = tlm[0];
-        escSensorData[escSensorMotor].voltage = tlm[1] << 8 | tlm[2];
-        escSensorData[escSensorMotor].current = tlm[3] << 8 | tlm[4];
-        escSensorData[escSensorMotor].consumption = tlm[5] << 8 | tlm[6];
-        escSensorData[escSensorMotor].rpm = tlm[7] << 8 | tlm[8];
+        escSensorData[escSensorMotor].temperature = telemetryBuffer[0];
+        escSensorData[escSensorMotor].voltage = telemetryBuffer[1] << 8 | telemetryBuffer[2];
+        escSensorData[escSensorMotor].current = telemetryBuffer[3] << 8 | telemetryBuffer[4];
+        escSensorData[escSensorMotor].consumption = telemetryBuffer[5] << 8 | telemetryBuffer[6];
+        escSensorData[escSensorMotor].rpm = telemetryBuffer[7] << 8 | telemetryBuffer[8];
 
         combinedDataNeedsUpdate = true;
 
         frameStatus = ESC_SENSOR_FRAME_COMPLETE;
 
-        DEBUG_SET(DEBUG_ESC_SENSOR_RPM, escSensorMotor, escSensorData[escSensorMotor].rpm);
-        DEBUG_SET(DEBUG_ESC_SENSOR_TMP, escSensorMotor, escSensorData[escSensorMotor].temperature);
+        if (escSensorMotor < 4) {
+            DEBUG_SET(DEBUG_ESC_SENSOR_RPM, escSensorMotor, calcEscRpm(escSensorData[escSensorMotor].rpm) / 10); // output actual rpm/10 to fit in 16bit signed.
+            DEBUG_SET(DEBUG_ESC_SENSOR_TMP, escSensorMotor, escSensorData[escSensorMotor].temperature);
+        }
     } else {
         frameStatus = ESC_SENSOR_FRAME_FAILED;
     }
@@ -262,11 +298,13 @@ static void selectNextMotor(void)
     }
 }
 
+// XXX Review ESC sensor under refactored motor handling
+
 void escSensorProcess(timeUs_t currentTimeUs)
 {
     const timeMs_t currentTimeMs = currentTimeUs / 1000;
 
-    if (!escSensorPort) {
+    if (!escSensorPort || !motorIsEnabled()) {
         return;
     }
 
@@ -281,9 +319,9 @@ void escSensorProcess(timeUs_t currentTimeUs)
         case ESC_SENSOR_TRIGGER_READY:
             escTriggerTimestamp = currentTimeMs;
 
-            tlmFramePending = true;
+            startEscDataRead(telemetryBuffer, TELEMETRY_FRAME_SIZE);
             motorDmaOutput_t * const motor = getMotorDmaOutput(escSensorMotor);
-            motor->requestTelemetry = true;
+            motor->protocolControl.requestTelemetry = true;
             escSensorTriggerState = ESC_SENSOR_TRIGGER_PENDING;
 
             DEBUG_SET(DEBUG_ESC_SENSOR, DEBUG_ESC_MOTOR_INDEX, escSensorMotor + 1);
@@ -321,5 +359,10 @@ void escSensorProcess(timeUs_t currentTimeUs)
 
             break;
     }
+}
+
+int calcEscRpm(int erpm)
+{
+    return (erpm * 100) / (motorConfig()->motorPoleCount / 2);
 }
 #endif

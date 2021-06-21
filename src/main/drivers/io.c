@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include "platform.h"
@@ -77,6 +80,29 @@ const struct ioPortDef_s ioPortDefs[] = {
     { RCC_AHB1(GPIOE) },
     { RCC_AHB1(GPIOF) },
 };
+#elif defined(STM32H7)
+const struct ioPortDef_s ioPortDefs[] = {
+    { RCC_AHB4(GPIOA) },
+    { RCC_AHB4(GPIOB) },
+    { RCC_AHB4(GPIOC) },
+    { RCC_AHB4(GPIOD) },
+    { RCC_AHB4(GPIOE) },
+    { RCC_AHB4(GPIOF) },
+    { RCC_AHB4(GPIOG) },
+    { RCC_AHB4(GPIOH) },
+#if !(defined(STM32H723xx) || defined(STM32H725xx))
+    { RCC_AHB4(GPIOI) },
+#endif
+};
+#elif defined(STM32G4)
+const struct ioPortDef_s ioPortDefs[] = {
+    { RCC_AHB2(GPIOA) },
+    { RCC_AHB2(GPIOB) },
+    { RCC_AHB2(GPIOC) },
+    { RCC_AHB2(GPIOD) },
+    { RCC_AHB2(GPIOE) },
+    { RCC_AHB2(GPIOF) },
+};
 #endif
 
 ioRec_t* IO_Rec(IO_t io)
@@ -86,21 +112,22 @@ ioRec_t* IO_Rec(IO_t io)
 
 GPIO_TypeDef* IO_GPIO(IO_t io)
 {
-    ioRec_t *ioRec = IO_Rec(io);
+    const ioRec_t *ioRec = IO_Rec(io);
     return ioRec->gpio;
 }
 
 uint16_t IO_Pin(IO_t io)
 {
-    ioRec_t *ioRec = IO_Rec(io);
+    const ioRec_t *ioRec = IO_Rec(io);
     return ioRec->pin;
 }
 
 // port index, GPIOA == 0
 int IO_GPIOPortIdx(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return -1;
+    }
     return (((size_t)IO_GPIO(io) - GPIOA_BASE) >> 10);     // ports are 0x400 apart
 }
 
@@ -117,8 +144,9 @@ int IO_GPIO_PortSource(IO_t io)
 // zero based pin index
 int IO_GPIOPinIdx(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return -1;
+    }
     return 31 - __builtin_clz(IO_Pin(io));  // CLZ is a bit faster than FFS
 }
 
@@ -135,18 +163,15 @@ int IO_GPIO_PinSource(IO_t io)
 // mask on stm32f103, bit index on stm32f303
 uint32_t IO_EXTI_Line(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return 0;
-#if defined(STM32F1)
+    }
+#if defined(STM32F1) || defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4)
     return 1 << IO_GPIOPinIdx(io);
 #elif defined(STM32F3)
     return IO_GPIOPinIdx(io);
-#elif defined(STM32F4)
-    return 1 << IO_GPIOPinIdx(io);
-#elif defined(STM32F7)
-    return 1 << IO_GPIOPinIdx(io);
 #elif defined(SIMULATOR_BUILD)
-    return 1;
+    return 0;
 #else
 # error "Unknown target type"
 #endif
@@ -154,31 +179,31 @@ uint32_t IO_EXTI_Line(IO_t io)
 
 bool IORead(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return false;
-#if defined(USE_HAL_DRIVER)
-    return !! HAL_GPIO_ReadPin(IO_GPIO(io),IO_Pin(io));
+    }
+#if defined(USE_FULL_LL_DRIVER)
+    return (LL_GPIO_ReadInputPort(IO_GPIO(io)) & IO_Pin(io));
+#elif defined(USE_HAL_DRIVER)
+    return !! HAL_GPIO_ReadPin(IO_GPIO(io), IO_Pin(io));
 #else
-    return !! (IO_GPIO(io)->IDR & IO_Pin(io));
+    return (IO_GPIO(io)->IDR & IO_Pin(io));
 #endif
 }
 
 void IOWrite(IO_t io, bool hi)
 {
-    if (!io)
+    if (!io) {
         return;
-#if defined(USE_HAL_DRIVER)
-    if (hi) {
-        HAL_GPIO_WritePin(IO_GPIO(io),IO_Pin(io),GPIO_PIN_SET);
     }
-    else {
-        HAL_GPIO_WritePin(IO_GPIO(io),IO_Pin(io),GPIO_PIN_RESET);
-    }
+#if defined(USE_FULL_LL_DRIVER)
+    LL_GPIO_SetOutputPin(IO_GPIO(io), IO_Pin(io) << (hi ? 0 : 16));
+#elif defined(USE_HAL_DRIVER)
+    HAL_GPIO_WritePin(IO_GPIO(io), IO_Pin(io), hi ? GPIO_PIN_SET : GPIO_PIN_RESET);
 #elif defined(STM32F4)
     if (hi) {
         IO_GPIO(io)->BSRRL = IO_Pin(io);
-    }
-    else {
+    } else {
         IO_GPIO(io)->BSRRH = IO_Pin(io);
     }
 #else
@@ -188,10 +213,13 @@ void IOWrite(IO_t io, bool hi)
 
 void IOHi(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return;
-#if defined(USE_HAL_DRIVER)
-    HAL_GPIO_WritePin(IO_GPIO(io),IO_Pin(io),GPIO_PIN_SET);
+    }
+#if defined(USE_FULL_LL_DRIVER)
+    LL_GPIO_SetOutputPin(IO_GPIO(io), IO_Pin(io));
+#elif defined(USE_HAL_DRIVER)
+    HAL_GPIO_WritePin(IO_GPIO(io), IO_Pin(io), GPIO_PIN_SET);
 #elif defined(STM32F4)
     IO_GPIO(io)->BSRRL = IO_Pin(io);
 #else
@@ -201,10 +229,13 @@ void IOHi(IO_t io)
 
 void IOLo(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return;
-#if defined(USE_HAL_DRIVER)
-    HAL_GPIO_WritePin(IO_GPIO(io),IO_Pin(io),GPIO_PIN_RESET);
+    }
+#if defined(USE_FULL_LL_DRIVER)
+    LL_GPIO_ResetOutputPin(IO_GPIO(io), IO_Pin(io));
+#elif defined(USE_HAL_DRIVER)
+    HAL_GPIO_WritePin(IO_GPIO(io), IO_Pin(io), GPIO_PIN_RESET);
 #elif defined(STM32F4)
     IO_GPIO(io)->BSRRH = IO_Pin(io);
 #else
@@ -214,15 +245,22 @@ void IOLo(IO_t io)
 
 void IOToggle(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return;
+    }
+
     uint32_t mask = IO_Pin(io);
     // Read pin state from ODR but write to BSRR because it only changes the pins
     // high in the mask value rather than all pins. XORing ODR directly risks
     // setting other pins incorrectly because it change all pins' state.
-#if defined(USE_HAL_DRIVER)
-    (void)mask;
-    HAL_GPIO_TogglePin(IO_GPIO(io),IO_Pin(io));
+#if defined(USE_FULL_LL_DRIVER)
+    if (LL_GPIO_ReadOutputPort(IO_GPIO(io)) & mask) {
+        mask <<= 16;   // bit is set, shift mask to reset half
+    }
+    LL_GPIO_SetOutputPin(IO_GPIO(io), mask);
+#elif defined(USE_HAL_DRIVER)
+    UNUSED(mask);
+    HAL_GPIO_TogglePin(IO_GPIO(io), IO_Pin(io));
 #elif defined(STM32F4)
     if (IO_GPIO(io)->ODR & mask) {
         IO_GPIO(io)->BSRRH = mask;
@@ -240,8 +278,9 @@ void IOToggle(IO_t io)
 // claim IO pin, set owner and resources
 void IOInit(IO_t io, resourceOwner_e owner, uint8_t index)
 {
-    if (!io)
+    if (!io) {
         return;
+    }
     ioRec_t *ioRec = IO_Rec(io);
     ioRec->owner = owner;
     ioRec->index = index;
@@ -249,27 +288,42 @@ void IOInit(IO_t io, resourceOwner_e owner, uint8_t index)
 
 void IORelease(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return;
+    }
     ioRec_t *ioRec = IO_Rec(io);
     ioRec->owner = OWNER_FREE;
 }
 
 resourceOwner_e IOGetOwner(IO_t io)
 {
-    if (!io)
+    if (!io) {
         return OWNER_FREE;
-    ioRec_t *ioRec = IO_Rec(io);
+    }
+    const ioRec_t *ioRec = IO_Rec(io);
     return ioRec->owner;
+}
+
+bool IOIsFreeOrPreinit(IO_t io)
+{
+    resourceOwner_e owner = IOGetOwner(io);
+
+    if (owner == OWNER_FREE || owner == OWNER_PREINIT) {
+        return true;
+    }
+
+    return false;
 }
 
 #if defined(STM32F1)
 
 void IOConfigGPIO(IO_t io, ioConfig_t cfg)
 {
-    if (!io)
+    if (!io) {
         return;
-    rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
+    }
+
+    const rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
     RCC_ClockCmd(rcc, ENABLE);
 
     GPIO_InitTypeDef init = {
@@ -280,28 +334,19 @@ void IOConfigGPIO(IO_t io, ioConfig_t cfg)
     GPIO_Init(IO_GPIO(io), &init);
 }
 
-#elif defined(STM32F7)
+#elif defined(STM32H7) || defined(STM32G4)
 
 void IOConfigGPIO(IO_t io, ioConfig_t cfg)
 {
-    if (!io)
-        return;
-    rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
-    RCC_ClockCmd(rcc, ENABLE);
-
-    GPIO_InitTypeDef init = {
-        .Pin = IO_Pin(io),
-        .Mode = (cfg >> 0) & 0x13,
-        .Speed = (cfg >> 2) & 0x03,
-        .Pull = (cfg >> 5) & 0x03,
-    };
-    HAL_GPIO_Init(IO_GPIO(io), &init);
+    IOConfigGPIOAF(io, cfg, 0);
 }
 
 void IOConfigGPIOAF(IO_t io, ioConfig_t cfg, uint8_t af)
 {
-    if (!io)
+    if (!io) {
         return;
+    }
+
     rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
     RCC_ClockCmd(rcc, ENABLE);
 
@@ -312,15 +357,47 @@ void IOConfigGPIOAF(IO_t io, ioConfig_t cfg, uint8_t af)
         .Pull = (cfg >> 5) & 0x03,
         .Alternate = af
     };
+
     HAL_GPIO_Init(IO_GPIO(io), &init);
 }
+
+#elif defined(STM32F7)
+
+void IOConfigGPIO(IO_t io, ioConfig_t cfg)
+{
+    IOConfigGPIOAF(io, cfg, 0);
+}
+
+void IOConfigGPIOAF(IO_t io, ioConfig_t cfg, uint8_t af)
+{
+    if (!io) {
+        return;
+    }
+
+    const rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
+    RCC_ClockCmd(rcc, ENABLE);
+
+    LL_GPIO_InitTypeDef init = {
+        .Pin = IO_Pin(io),
+        .Mode = (cfg >> 0) & 0x03,
+        .Speed = (cfg >> 2) & 0x03,
+        .OutputType = (cfg >> 4) & 0x01,
+        .Pull = (cfg >> 5) & 0x03,
+        .Alternate = af
+    };
+
+    LL_GPIO_Init(IO_GPIO(io), &init);
+}
+
 #elif defined(STM32F3) || defined(STM32F4)
 
 void IOConfigGPIO(IO_t io, ioConfig_t cfg)
 {
-    if (!io)
+    if (!io) {
         return;
-    rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
+    }
+
+    const rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
     RCC_ClockCmd(rcc, ENABLE);
 
     GPIO_InitTypeDef init = {
@@ -335,10 +412,11 @@ void IOConfigGPIO(IO_t io, ioConfig_t cfg)
 
 void IOConfigGPIOAF(IO_t io, ioConfig_t cfg, uint8_t af)
 {
-    if (!io)
+    if (!io) {
         return;
+    }
 
-    rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
+    const rccPeriphTag_t rcc = ioPortDefs[IO_GPIOPortIdx(io)].rcc;
     RCC_ClockCmd(rcc, ENABLE);
     GPIO_PinAFConfig(IO_GPIO(io), IO_GPIO_PinSource(io), af);
 
@@ -353,13 +431,25 @@ void IOConfigGPIOAF(IO_t io, ioConfig_t cfg, uint8_t af)
 }
 #endif
 
+#if DEFIO_PORT_USED_COUNT > 0
 static const uint16_t ioDefUsedMask[DEFIO_PORT_USED_COUNT] = { DEFIO_PORT_USED_LIST };
 static const uint8_t ioDefUsedOffset[DEFIO_PORT_USED_COUNT] = { DEFIO_PORT_OFFSET_LIST };
+#else
+// Avoid -Wpedantic warning
+static const uint16_t ioDefUsedMask[1] = {0};
+static const uint8_t ioDefUsedOffset[1] = {0};
+#endif
+#if DEFIO_IO_USED_COUNT
 ioRec_t ioRecs[DEFIO_IO_USED_COUNT];
+#else
+// Avoid -Wpedantic warning
+ioRec_t ioRecs[1];
+#endif
 
 // initialize all ioRec_t structures from ROM
 // currently only bitmask is used, this may change in future
-void IOInitGlobal(void) {
+void IOInitGlobal(void)
+{
     ioRec_t *ioRec = ioRecs;
 
     for (unsigned port = 0; port < ARRAYLEN(ioDefUsedMask); port++) {
@@ -375,17 +465,26 @@ void IOInitGlobal(void) {
 
 IO_t IOGetByTag(ioTag_t tag)
 {
-    int portIdx = DEFIO_TAG_GPIOID(tag);
-    int pinIdx = DEFIO_TAG_PIN(tag);
+    const int portIdx = DEFIO_TAG_GPIOID(tag);
+    const int pinIdx = DEFIO_TAG_PIN(tag);
 
-    if (portIdx >= DEFIO_PORT_USED_COUNT)
+    if (portIdx < 0 || portIdx >= DEFIO_PORT_USED_COUNT) {
         return NULL;
+    }
     // check if pin exists
-    if (!(ioDefUsedMask[portIdx] & (1 << pinIdx)))
+    if (!(ioDefUsedMask[portIdx] & (1 << pinIdx))) {
         return NULL;
+    }
     // count bits before this pin on single port
     int offset = __builtin_popcount(((1 << pinIdx) - 1) & ioDefUsedMask[portIdx]);
     // and add port offset
     offset += ioDefUsedOffset[portIdx];
     return ioRecs + offset;
+}
+
+void IOTraversePins(IOTraverseFuncPtr_t fnPtr)
+{
+    for (int i = 0; i < DEFIO_IO_USED_COUNT; i++) {
+        fnPtr(&ioRecs[i]);
+    }
 }

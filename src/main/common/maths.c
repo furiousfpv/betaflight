@@ -1,22 +1,29 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdint.h>
 #include <math.h>
+
+#include "platform.h"
+
+#include "build/build_config.h"
 
 #include "axis.h"
 #include "maths.h"
@@ -99,23 +106,31 @@ float acos_approx(float x)
 }
 #endif
 
-float powerf(float base, int exp) {
-    float result = base;
-    for (int count = 1; count < exp; count++) result *= base;
+int gcd(int num, int denom)
+{
+    if (denom == 0) {
+        return num;
+    }
 
-    return result;
+    return gcd(denom, num % denom);
 }
 
-int32_t applyDeadband(int32_t value, int32_t deadband)
+int32_t applyDeadband(const int32_t value, const int32_t deadband)
 {
     if (ABS(value) < deadband) {
-        value = 0;
-    } else if (value > 0) {
-        value -= deadband;
-    } else if (value < 0) {
-        value += deadband;
+        return 0;
     }
-    return value;
+
+    return value >= 0 ? value - deadband : value + deadband;
+}
+
+float fapplyDeadband(const float value, const float deadband)
+{
+    if (fabsf(value) < deadband) {
+        return 0;
+    }
+
+    return value >= 0 ? value - deadband : value + deadband;
 }
 
 void devClear(stdev_t *dev)
@@ -158,20 +173,13 @@ int scaleRange(int x, int srcFrom, int srcTo, int destFrom, int destTo) {
     return (a / b) + destFrom;
 }
 
-// Normalize a vector
-void normalizeV(struct fp_vector *src, struct fp_vector *dest)
-{
-    float length;
-
-    length = sqrtf(src->X * src->X + src->Y * src->Y + src->Z * src->Z);
-    if (length != 0) {
-        dest->X = src->X / length;
-        dest->Y = src->Y / length;
-        dest->Z = src->Z / length;
-    }
+float scaleRangef(float x, float srcFrom, float srcTo, float destFrom, float destTo) {
+    float a = (destTo - destFrom) * (x - srcFrom);
+    float b = srcTo - srcFrom;
+    return (a / b) + destFrom;
 }
 
-void buildRotationMatrix(fp_angles_t *delta, float matrix[3][3])
+void buildRotationMatrix(fp_angles_t *delta, fp_rotationMatrix_t *rotation)
 {
     float cosx, sinx, cosy, siny, cosz, sinz;
     float coszcosx, sinzcosx, coszsinx, sinzsinx;
@@ -188,29 +196,25 @@ void buildRotationMatrix(fp_angles_t *delta, float matrix[3][3])
     coszsinx = sinx * cosz;
     sinzsinx = sinx * sinz;
 
-    matrix[0][X] = cosz * cosy;
-    matrix[0][Y] = -cosy * sinz;
-    matrix[0][Z] = siny;
-    matrix[1][X] = sinzcosx + (coszsinx * siny);
-    matrix[1][Y] = coszcosx - (sinzsinx * siny);
-    matrix[1][Z] = -sinx * cosy;
-    matrix[2][X] = (sinzsinx) - (coszcosx * siny);
-    matrix[2][Y] = (coszsinx) + (sinzcosx * siny);
-    matrix[2][Z] = cosy * cosx;
+    rotation->m[0][X] = cosz * cosy;
+    rotation->m[0][Y] = -cosy * sinz;
+    rotation->m[0][Z] = siny;
+    rotation->m[1][X] = sinzcosx + (coszsinx * siny);
+    rotation->m[1][Y] = coszcosx - (sinzsinx * siny);
+    rotation->m[1][Z] = -sinx * cosy;
+    rotation->m[2][X] = (sinzsinx) - (coszcosx * siny);
+    rotation->m[2][Y] = (coszsinx) + (sinzcosx * siny);
+    rotation->m[2][Z] = cosy * cosx;
 }
 
-// Rotate a vector *v by the euler angles defined by the 3-vector *delta.
-void rotateV(struct fp_vector *v, fp_angles_t *delta)
+void applyMatrixRotation(float *v, fp_rotationMatrix_t *rotationMatrix)
 {
-    struct fp_vector v_tmp = *v;
+    struct fp_vector *vDest = (struct fp_vector *)v;
+    struct fp_vector vTmp = *vDest;
 
-    float matrix[3][3];
-
-    buildRotationMatrix(delta, matrix);
-
-    v->X = v_tmp.X * matrix[0][X] + v_tmp.Y * matrix[1][X] + v_tmp.Z * matrix[2][X];
-    v->Y = v_tmp.X * matrix[0][Y] + v_tmp.Y * matrix[1][Y] + v_tmp.Z * matrix[2][Y];
-    v->Z = v_tmp.X * matrix[0][Z] + v_tmp.Y * matrix[1][Z] + v_tmp.Z * matrix[2][Z];
+    vDest->X = (rotationMatrix->m[0][X] * vTmp.X + rotationMatrix->m[1][X] * vTmp.Y + rotationMatrix->m[2][X] * vTmp.Z);
+    vDest->Y = (rotationMatrix->m[0][Y] * vTmp.X + rotationMatrix->m[1][Y] * vTmp.Y + rotationMatrix->m[2][Y] * vTmp.Z);
+    vDest->Z = (rotationMatrix->m[0][Z] * vTmp.X + rotationMatrix->m[1][Z] * vTmp.Y + rotationMatrix->m[2][Z] * vTmp.Z);
 }
 
 // Quick median filter implementation
@@ -336,41 +340,3 @@ int16_t qMultiply(fix12_t q, int16_t input) {
 fix12_t  qConstruct(int16_t num, int16_t den) {
     return (num << 12) / den;
 }
-
-uint16_t crc16_ccitt(uint16_t crc, unsigned char a)
-{
-    crc ^= (uint16_t)a << 8;
-    for (int ii = 0; ii < 8; ++ii) {
-        if (crc & 0x8000) {
-            crc = (crc << 1) ^ 0x1021;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc;
-}
-
-uint16_t crc16_ccitt_update(uint16_t crc, const void *data, uint32_t length)
-{
-    const uint8_t *p = (const uint8_t *)data;
-    const uint8_t *pend = p + length;
-
-    for (; p != pend; p++) {
-        crc = crc16_ccitt(crc, *p);
-    }
-    return crc;
-}
-
-uint8_t crc8_dvb_s2(uint8_t crc, unsigned char a)
-{
-    crc ^= a;
-    for (int ii = 0; ii < 8; ++ii) {
-        if (crc & 0x80) {
-            crc = (crc << 1) ^ 0xD5;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc;
-}
-

@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -28,6 +31,58 @@ uint8_t stateFlags = 0;
 uint16_t flightModeFlags = 0;
 
 static uint32_t enabledSensors = 0;
+
+// Must be no longer than OSD_WARNINGS_MAX_SIZE (11) to be displayed fully in OSD
+const char *armingDisableFlagNames[]= {
+    "NOGYRO",
+    "FAILSAFE",
+    "RXLOSS",
+    "BADRX",
+    "BOXFAILSAFE",
+    "RUNAWAY",
+    "CRASH",
+    "THROTTLE",
+    "ANGLE",
+    "BOOTGRACE",
+    "NOPREARM",
+    "LOAD",
+    "CALIB",
+    "CLI",
+    "CMS",
+    "BST",
+    "MSP",
+    "PARALYZE",
+    "GPS",
+    "RESCUE_SW",
+    "RPMFILTER",
+    "REBOOT_REQD",
+    "DSHOT_BBANG",
+    "NO_ACC_CAL",
+    "MOTOR_PROTO",
+    "ARMSWITCH",
+};
+
+static armingDisableFlags_e armingDisableFlags = 0;
+
+void setArmingDisabled(armingDisableFlags_e flag)
+{
+    armingDisableFlags = armingDisableFlags | flag;
+}
+
+void unsetArmingDisabled(armingDisableFlags_e flag)
+{
+    armingDisableFlags = armingDisableFlags & ~flag;
+}
+
+bool isArmingDisabled(void)
+{
+    return armingDisableFlags;
+}
+
+armingDisableFlags_e getArmingDisableFlags(void)
+{
+    return armingDisableFlags;
+}
 
 /**
  * Enables the given flight mode.  A beep is sounded if the flight mode

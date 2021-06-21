@@ -22,7 +22,7 @@
 
 #include <math.h>
 
-#define BARO
+#define USE_BARO
 
 extern "C" {
     #include "common/maths.h"
@@ -195,39 +195,14 @@ TEST(MathsUnittest, TestApplyDeadband)
     EXPECT_EQ(applyDeadband(-11, 10), -1);
 }
 
-void expectVectorsAreEqual(struct fp_vector *a, struct fp_vector *b)
+void expectVectorsAreEqual(struct fp_vector *a, struct fp_vector *b, float absTol)
 {
-    EXPECT_FLOAT_EQ(a->X, b->X);
-    EXPECT_FLOAT_EQ(a->Y, b->Y);
-    EXPECT_FLOAT_EQ(a->Z, b->Z);
+    EXPECT_NEAR(a->X, b->X, absTol);
+    EXPECT_NEAR(a->Y, b->Y, absTol);
+    EXPECT_NEAR(a->Z, b->Z, absTol);
 }
 
-/*
-TEST(MathsUnittest, TestRotateVectorWithNoAngle)
-{
-    fp_vector vector = {1.0f, 0.0f, 0.0f};
-    fp_angles_t euler_angles = {.raw={0.0f, 0.0f, 0.0f}};
-
-    rotateV(&vector, &euler_angles);
-    fp_vector expected_result = {1.0f, 0.0f, 0.0f};
-
-    expectVectorsAreEqual(&vector, &expected_result);
-}
-
-TEST(MathsUnittest, TestRotateVectorAroundAxis)
-{
-    // Rotate a vector <1, 0, 0> around an each axis x y and z.
-    fp_vector vector = {1.0f, 0.0f, 0.0f};
-    fp_angles_t euler_angles = {.raw={90.0f, 0.0f, 0.0f}};
-
-    rotateV(&vector, &euler_angles);
-    fp_vector expected_result = {1.0f, 0.0f, 0.0f};
-
-    expectVectorsAreEqual(&vector, &expected_result);
-}
-*/
 #if defined(FAST_MATH) || defined(VERY_FAST_MATH)
-/*
 TEST(MathsUnittest, TestFastTrigonometrySinCos)
 {
     double sinError = 0;
@@ -246,9 +221,8 @@ TEST(MathsUnittest, TestFastTrigonometrySinCos)
         cosError = MAX(cosError, fabs(approxResult - libmResult));
     }
     printf("cos_approx maximum absolute error = %e\n", cosError);
-    EXPECT_LE(cosError, 3e-6);
+    EXPECT_LE(cosError, 3.5e-6);
 }
-*/
 
 TEST(MathsUnittest, TestFastTrigonometryATan2)
 {

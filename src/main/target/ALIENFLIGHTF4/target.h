@@ -1,98 +1,87 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 #define TARGET_BOARD_IDENTIFIER "AFF4"
-#define TARGET_CONFIG
+#define USE_TARGET_CONFIG
 
 #define USE_HARDWARE_REVISION_DETECTION
 #define HW_PIN                  PC13
-#define BRUSHED_ESC_AUTODETECT
 
 #define USBD_PRODUCT_STRING "AlienFlight F4"
 
-#define LED0                    PC12
-#define LED1                    PD2
+#define LED0_PIN                PC12
+#define LED1_PIN                PD2
 
-#define BEEPER                  PC13
+#define USE_BEEPER
+#define BEEPER_PIN              PC13
 #define BEEPER_INVERTED
 
 #define INVERTER_PIN_UART2      PC15
 
 // MPU interrupt
 #define USE_EXTI
-#define MPU_INT_EXTI            PC14
+#define USE_GYRO_EXTI
+#define GYRO_1_EXTI_PIN         PC14
 //#define DEBUG_MPU_DATA_READY_INTERRUPT
 #define USE_MPU_DATA_READY_SIGNAL
 #define ENSURE_MPU_DATA_READY_IS_LOW
 
-#define MPU6500_CS_PIN          SPI1_NSS_PIN
-#define MPU6500_SPI_INSTANCE    SPI1
+#define GYRO_1_CS_PIN           SPI1_NSS_PIN
+#define GYRO_1_SPI_INSTANCE     SPI1
 
-#define ACC
+#define USE_ACC
 #define USE_ACC_SPI_MPU6500
-#define ACC_MPU6500_ALIGN       CW270_DEG
 
-#define GYRO
+#define USE_GYRO
 #define USE_GYRO_SPI_MPU6500
-#define GYRO_MPU6500_ALIGN      CW270_DEG
+#define GYRO_1_ALIGN            CW270_DEG
 
-#define MAG
+#define USE_MAG
 #define USE_MAG_HMC5883
+#define USE_MAG_QMC5883
 #define USE_MAG_AK8963
+#define USE_MAG_LIS3MDL
 
-#define MAG_HMC5883_ALIGN       CW180_DEG
-#define MAG_AK8963_ALIGN        CW270_DEG
+#define MAG_AK8963_ALIGN        CW180_DEG_FLIP
 
-#define BARO
+#define USE_BARO
 #define USE_BARO_MS5611
 #define USE_BARO_BMP280
 
 #define USE_SDCARD
-
-//#define SDCARD_DETECT_INVERTED
-
+#define USE_SDCARD_SPI
+#define SDCARD_DETECT_INVERTED
 #define SDCARD_DETECT_PIN               PB11
-#define SDCARD_DETECT_EXTI_LINE         EXTI_Line10
-#define SDCARD_DETECT_EXTI_PIN_SOURCE   EXTI_PinSource10
-#define SDCARD_DETECT_EXTI_PORT_SOURCE  EXTI_PortSourceGPIOB
-#define SDCARD_DETECT_EXTI_IRQn         EXTI15_10_IRQn
-
 #define SDCARD_SPI_INSTANCE             SPI2
 #define SDCARD_SPI_CS_PIN               PB10
-
-// SPI2 is on the APB1 bus whose clock runs at 84MHz. Divide to under 400kHz for init:
-#define SDCARD_SPI_INITIALIZATION_CLOCK_DIVIDER 256 // 328kHz
-// Divide to under 25MHz for normal operation:
-#define SDCARD_SPI_FULL_SPEED_CLOCK_DIVIDER 4 // 21MHz
-
-#define SDCARD_DMA_CHANNEL_TX               DMA1_Stream4
-#define SDCARD_DMA_CHANNEL_TX_COMPLETE_FLAG DMA_FLAG_TCIF4
-#define SDCARD_DMA_CLK                      RCC_AHB1Periph_DMA1
-#define SDCARD_DMA_CHANNEL                  DMA_Channel_0
+#define SPI2_TX_DMA_OPT                     0     // DMA 1 Stream 4 Channel 0
 
 // Performance logging for SD card operations:
 // #define AFATFS_USE_INTROSPECTIVE_LOGGING
 
-//#define M25P16_CS_PIN        SPI2_NSS_PIN
-//#define M25P16_SPI_INSTANCE  SPI2
+#define FLASH_CS_PIN         SPI2_NSS_PIN
+#define FLASH_SPI_INSTANCE   SPI2
 
-//#define USE_FLASHFS
-//#define USE_FLASH_M25P16
+#define USE_FLASHFS
+#define USE_FLASH_M25P16
 
 #define USE_VCP
 
@@ -109,8 +98,8 @@
 //#define UART3_TX_PIN            PB10
 
 #define USE_UART4
-#define UART4_RX_PIN            PC10
-#define UART4_TX_PIN            PC11
+#define UART4_RX_PIN            PC11
+#define UART4_TX_PIN            PC10
 
 #define USE_SOFTSERIAL1
 #define USE_SOFTSERIAL2
@@ -118,7 +107,7 @@
 #define SERIAL_PORT_COUNT       6
 
 #define USE_ESCSERIAL
-#define ESCSERIAL_TIMER_TX_HARDWARE 0 // PWM 1
+#define ESCSERIAL_TIMER_TX_PIN  PA8  // (HARDARE=0,PPM)
 
 #define USE_SPI
 #define USE_SPI_DEVICE_1
@@ -148,20 +137,18 @@
 #define I2C1_SDA                PB7
 
 #define USE_ADC
-//#define BOARD_HAS_VOLTAGE_DIVIDER
-//#define BOARD_HAS_CURRENT_SENSOR
+#define ADC_INSTANCE         ADC1  // Default added
+#define ADC1_DMA_OPT            0  // DMA 2 Stream 0 Channel 0 
+
+//#define DEFAULT_VOLTAGE_METER_SOURCE VOLTAGE_METER_ADC
+//#define DEFAULT_CURRENT_METER_SOURCE CURRENT_METER_ADC
 #define VBAT_ADC_PIN            PC0
 #define CURRENT_METER_ADC_PIN   PC1
 #define RSSI_ADC_PIN            PC4
-#define EXTERNAL1_ADC_GPIO_PIN  PC5
+#define EXTERNAL1_ADC_PIN       PC5
 
 #define CURRENT_METER_OFFSET_DEFAULT 2500                      // ACS712/714-30A - 0A = 2.5V
 #define CURRENT_METER_SCALE_DEFAULT -667                       // ACS712/714-30A - 66.666 mV/A inverted mode
-
-// LED strip configuration.
-#define LED_STRIP
-
-#define SPEKTRUM_BIND_PIN       UART2_RX_PIN
 
 #define BINDPLUG_PIN            PB2
 
@@ -171,10 +158,6 @@
 #define DEFAULT_RX_FEATURE      FEATURE_RX_SERIAL
 #define SERIALRX_UART           SERIAL_PORT_USART2
 #define RX_CHANNELS_TAER
-
-#define TELEMETRY_UART          SERIAL_PORT_USART1
-
-#define USE_SERIAL_4WAY_BLHELI_INTERFACE
 
 #define TARGET_IO_PORTA         0xffff
 #define TARGET_IO_PORTB         0xffff
