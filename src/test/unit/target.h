@@ -17,15 +17,31 @@
 
 #pragma once
 
-#define CMS
+#define SCHEDULER_DELAY_LIMIT 1
+#define TASK_GYROPID_DESIRED_PERIOD 100
+
+#define DMA_DATA
+#define DMA_DATA_ZERO_INIT
+#define STATIC_DMA_DATA_AUTO static
+#define MMFLASH_CODE
+#define MMFLASH_CODE_NOINLINE
+#define MMFLASH_DATA
+
+#define SPI_IO_CS_CFG 0
+
+#define USE_ACC
+#define USE_CMS
 #define CMS_MAX_DEVICE 4
-#define USE_FAKE_GYRO
-#define BLACKBOX
-#define MAG
-#define BARO
-#define GPS
+#define USE_VIRTUAL_GYRO
+#define USE_BEEPER
+#define USE_BLACKBOX
+#define USE_MAG
+#define USE_BARO
+#define USE_GPS
+#define USE_GPS_NMEA
+#define USE_GPS_UBLOX
 #define USE_DASHBOARD
-#define SERIAL_RX
+#define USE_SERIALRX
 #define USE_RX_MSP
 #define USE_SERIALRX_CRSF       // Team Black Sheep Crossfire protocol
 #define USE_SERIALRX_SPEKTRUM   // DSM2 and DSMX protocol
@@ -35,40 +51,37 @@
 #define USE_SERIALRX_SUMD       // Graupner Hott protocol
 #define USE_SERIALRX_SUMH       // Graupner legacy protocol
 #define USE_SERIALRX_XBUS       // JR
-#define TELEMETRY
-#define TELEMETRY_CRSF
-#define TELEMETRY_FRSKY
-#define TELEMETRY_HOTT
-#define TELEMETRY_IBUS
-#define TELEMETRY_JETIEXBUS
-#define TELEMETRY_LTM
-#define TELEMETRY_MAVLINK
-#define TELEMETRY_SMARTPORT
-#define LED_STRIP
+#define USE_TELEMETRY
+#define USE_TELEMETRY_CRSF
+#define USE_TELEMETRY_FRSKY_HUB
+#define USE_TELEMETRY_HOTT
+#define USE_TELEMETRY_IBUS
+#define USE_TELEMETRY_JETIEXBUS
+#define USE_TELEMETRY_LTM
+#define USE_TELEMETRY_MAVLINK
+#define USE_TELEMETRY_SMARTPORT
+#define USE_LED_STRIP
+#define USE_LED_STRIP_STATUS_MODE
 #define USE_SERVOS
-#define TRANSPONDER
+#define USE_TRANSPONDER
+#define USE_VIRTUAL_LED
 #define USE_VCP
 #define USE_UART1
 #define USE_UART2
 #define USE_UART3
 #define USE_UART4
 #define USE_UART5
-#define USE_SOFTSERIAL1
-#define USE_SOFTSERIAL2
-
-#define SERIAL_PORT_COUNT 8
+#define USE_SOFTSERIAL
 
 #define DEFAULT_AUX_CHANNEL_COUNT       MAX_AUX_CHANNEL_COUNT
+#define MAX_SIMULTANEOUS_ADJUSTMENT_COUNT 6  // needed for unittest
 
 #define TARGET_BOARD_IDENTIFIER "TEST"
 
-#define DEFAULT_BLACKBOX_DEVICE     BLACKBOX_DEVICE_SERIAL
-
-#define LED_STRIP_TIMER 1
-#define SOFTSERIAL_1_TIMER 2
-#define SOFTSERIAL_2_TIMER 3
+#define USABLE_TIMER_CHANNEL_COUNT 0
 
 #define TARGET_IO_PORTA         0xffff
 #define TARGET_IO_PORTB         0xffff
 #define TARGET_IO_PORTC         0xffff
 
+#include "target/serial_post.h"

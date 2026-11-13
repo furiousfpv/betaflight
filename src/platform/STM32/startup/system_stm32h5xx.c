@@ -1,0 +1,567 @@
+/**
+  ******************************************************************************
+  * @file    system_stm32h5xx.c
+  * @author  MCD Application Team
+  * @brief   CMSIS Cortex-M33 Device Peripheral Access Layer System Source File
+  *
+  ******************************************************************************
+  * @attention
+  *
+  * Copyright (c) 2023 STMicroelectronics.
+  * All rights reserved.
+  *
+  * This software is licensed under terms that can be found in the LICENSE file
+  * in the root directory of this software component.
+  * If no LICENSE file comes with this software, it is provided AS-IS.
+  *
+  ******************************************************************************
+  *   This file provides two functions and one global variable to be called from
+  *   user application:
+  *      - SystemInit(): This function is called at startup just after reset and
+  *                      before branch to main program. This call is made inside
+  *                      the "startup_stm32h5xx.s" file.
+  *
+  *      - SystemCoreClock variable: Contains the core clock (HCLK), it can be used
+  *                                  by the user application to setup the SysTick
+  *                                  timer or configure other parameters.
+  *
+  *      - SystemCoreClockUpdate(): Updates the variable SystemCoreClock and must
+  *                                 be called whenever the core clock is changed
+  *                                 during program execution.
+  *
+  *   After each device reset the HSI (64 MHz) is used as system clock source.
+  *   Then SystemInit() function is called, in "startup_stm32h5xx.s" file, to
+  *   configure the system clock before to branch to main program.
+  *
+  *   This file configures the system clock as follows:
+  *=============================================================================
+  *-----------------------------------------------------------------------------
+  *        System Clock source                     | HSI
+  *-----------------------------------------------------------------------------
+  *        SYSCLK(Hz)                              | 64000000
+  *-----------------------------------------------------------------------------
+  *        HCLK(Hz)                                | 64000000
+  *-----------------------------------------------------------------------------
+  *        AHB Prescaler                           | 1
+  *-----------------------------------------------------------------------------
+  *        APB1 Prescaler                          | 1
+  *-----------------------------------------------------------------------------
+  *        APB2 Prescaler                          | 1
+  *-----------------------------------------------------------------------------
+  *        APB3 Prescaler                          | 1
+  *-----------------------------------------------------------------------------
+  *        HSI Division factor                     | 1
+  *-----------------------------------------------------------------------------
+  *        PLL1_SRC                                | No clock
+  *-----------------------------------------------------------------------------
+  *        PLL1_M                                  | Prescaler disabled
+  *-----------------------------------------------------------------------------
+  *        PLL1_N                                  | 129
+  *-----------------------------------------------------------------------------
+  *        PLL1_P                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL1_Q                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL1_R                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL1_FRACN                              | 0
+  *-----------------------------------------------------------------------------
+  *        PLL2_SRC                                | No clock
+  *-----------------------------------------------------------------------------
+  *        PLL2_M                                  | Prescaler disabled
+  *-----------------------------------------------------------------------------
+  *        PLL2_N                                  | 129
+  *-----------------------------------------------------------------------------
+  *        PLL2_P                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL2_Q                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL2_R                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL2_FRACN                              | 0
+  *-----------------------------------------------------------------------------
+  *        PLL3_SRC                                | No clock
+  *-----------------------------------------------------------------------------
+  *        PLL3_M                                  | Prescaler disabled
+  *-----------------------------------------------------------------------------
+  *        PLL3_N                                  | 129
+  *-----------------------------------------------------------------------------
+  *        PLL3_P                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL3_Q                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL3_R                                  | 2
+  *-----------------------------------------------------------------------------
+  *        PLL3_FRACN                              | 0
+  *-----------------------------------------------------------------------------
+  *=============================================================================
+  */
+
+/** @addtogroup CMSIS
+  * @{
+  */
+
+/** @addtogroup STM32H5xx_system
+  * @{
+  */
+
+/** @addtogroup STM32H5xx_System_Private_Includes
+  * @{
+  */
+
+#include <string.h>
+
+#include "stm32h5xx.h"
+#include "drivers/system.h"
+#include "platform.h"
+#include "drivers/persistent.h"
+
+/**
+  * @}
+  */
+
+/** @addtogroup STM32H5xx_System_Private_TypesDefinitions
+  * @{
+  */
+
+/**
+  * @}
+  */
+
+/** @addtogroup STM32H5xx_System_Private_Defines
+  * @{
+  */
+
+#if !defined  (HSE_VALUE)
+  #define HSE_VALUE    (25000000UL) /*!< Value of the External oscillator in Hz */
+#endif /* HSE_VALUE */
+
+#if !defined  (CSI_VALUE)
+  #define CSI_VALUE    (4000000UL)  /*!< Value of the Internal oscillator in Hz*/
+#endif /* CSI_VALUE */
+
+#if !defined  (HSI_VALUE)
+  #define HSI_VALUE    (64000000UL) /*!< Value of the Internal oscillator in Hz */
+#endif /* HSI_VALUE */
+
+/************************* Miscellaneous Configuration ************************/
+/*!< Uncomment the following line if you need to relocate your vector Table in
+     Internal SRAM. */
+/* #define VECT_TAB_SRAM */
+#define VECT_TAB_OFFSET  0x00U /*!< Vector Table base offset field.
+                                   This value must be a multiple of 0x200. */
+/******************************************************************************/
+
+/**
+  * @}
+  */
+
+/** @addtogroup STM32H5xx_System_Private_Macros
+  * @{
+  */
+
+/**
+  * @}
+  */
+
+/** @addtogroup STM32H5xx_System_Private_Variables
+  * @{
+  */
+  /* The SystemCoreClock variable is updated in three ways:
+      1) by calling CMSIS function SystemCoreClockUpdate()
+      2) by calling HAL API function HAL_RCC_GetHCLKFreq()
+      3) each time HAL_RCC_ClockConfig() is called to configure the system clock frequency
+         Note: If you use this function to configure the system clock; then there
+               is no need to call the 2 first functions listed above, since SystemCoreClock
+               variable is updated automatically.
+  */
+  uint32_t SystemCoreClock = 64000000U;
+
+  const uint8_t  AHBPrescTable[16] = {0U, 0U, 0U, 0U, 0U, 0U, 0U, 0U, 1U, 2U, 3U, 4U, 6U, 7U, 8U, 9U};
+  const uint8_t  APBPrescTable[8] =  {0U, 0U, 0U, 0U, 1U, 2U, 3U, 4U};
+/**
+  * @}
+  */
+
+/** @addtogroup STM32H5xx_System_Private_FunctionPrototypes
+  * @{
+  */
+
+void SystemClock_Config(void); // Forward
+
+/**
+  * @}
+  */
+
+/** @addtogroup STM32H5xx_System_Private_Functions
+  * @{
+  */
+
+// H5 default clock tree: drive SYSCLK from HSE × PLL1 to the H5's 250 MHz
+// peak and run HCLK / APB1 / APB2 / APB3 at the full SYSCLK (all max 250 MHz
+// per RM0481 §6.6). USB FS keeps its own 48 MHz reference from HSI48 +
+// CRS-against-SOF so it is independent of the system clock domain.
+//
+// PLL1 targets a 500 MHz VCO → 250 MHz SYSCLK (P=2), with PLLM chosen so the
+// PFD (HSE/M) stays inside a single VCIRANGE window and N gives the 500 MHz VCO
+// with an integer ratio. The PFD band determines PLLRGE (RM0481 §10.5), so it
+// is selected per HSE value below rather than hardcoded — HSE_VALUE is derived
+// from each board's SYSTEM_HSE_MHZ (mk/config.mk). To support a new crystal,
+// add a case here (target 500 MHz VCO, PFD in a valid VCIRANGE band).
+//
+//   8 MHz HSE  : M=2 → PFD 4.0 MHz (VCIRANGE_2, lower edge), N=125 → VCO 500 MHz
+//   25 MHz HSE : M=5 → PFD 5.0 MHz (VCIRANGE_2),             N=100 → VCO 500 MHz
+//   common     : P=2 → 250 MHz, Q=4 → 125 MHz, R=2 → 250 MHz, VCORANGE_WIDE
+//
+// Voltage scale 0 covers up to 250 MHz; flash latency at VOS0 / 250 MHz is
+// 5 WS (RM0481 §7.5 Table 39).
+//
+// If HSE fails to start (e.g. development board with crystal removed or
+// damaged) the function falls back to HSI 64 MHz at VOS0, leaving the rest
+// of the platform usable for diagnostics.
+#if HSE_VALUE == 8000000
+#define PLL1_M          2                       // PFD = 4 MHz
+#define PLL1_N          125                     // VCO = 500 MHz
+#define PLL1_VCIRANGE   RCC_PLL1_VCIRANGE_2     // 4-8 MHz PFD band
+#elif HSE_VALUE == 25000000
+#define PLL1_M          5                       // PFD = 5 MHz
+#define PLL1_N          100                     // VCO = 500 MHz
+#define PLL1_VCIRANGE   RCC_PLL1_VCIRANGE_2     // 4-8 MHz PFD band
+#else
+#error "STM32H5 SystemClock_Config: unsupported SYSTEM_HSE_MHZ. Add a PLL1 ratio (target 500 MHz VCO, PFD in a valid VCIRANGE band)."
+#endif
+
+__attribute__((weak))
+void SystemClock_Config(void)
+{
+    // Voltage scale 0: required headroom for the 250 MHz domain.
+    // (PWR has no RCC enable bit on H5 — RM0481 §8 lists no PWREN — so
+    // __HAL_RCC_PWR_CLK_ENABLE() is unnecessary and the H5 HAL does not
+    // export it. PWR is always-clocked.)
+    __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE0);
+    while (!__HAL_PWR_GET_FLAG(PWR_FLAG_VOSRDY)) { }
+
+    // Flash high-frequency mode for the 225-250 MHz CPU range at VOS0.
+    // RM0481 §7.5 Table 39 requires WRHIGHFREQ=10 to be set BEFORE the
+    // CPU is taken above 225 MHz; HAL_RCC_ClockConfig() programs LATENCY
+    // but never touches WRHIGHFREQ.
+    MODIFY_REG(FLASH->ACR, FLASH_ACR_WRHIGHFREQ, FLASH_ACR_WRHIGHFREQ_1);
+
+    RCC_OscInitTypeDef oscInit = {0};
+    oscInit.OscillatorType   = RCC_OSCILLATORTYPE_HSE | RCC_OSCILLATORTYPE_HSI48;
+    oscInit.HSEState         = RCC_HSE_ON;
+    oscInit.HSI48State       = RCC_HSI48_ON;
+    oscInit.PLL.PLLState     = RCC_PLL_ON;
+    oscInit.PLL.PLLSource    = RCC_PLL1_SOURCE_HSE;
+    oscInit.PLL.PLLM         = PLL1_M;
+    oscInit.PLL.PLLN         = PLL1_N;
+    oscInit.PLL.PLLP         = 2;
+    oscInit.PLL.PLLQ         = 4;
+    oscInit.PLL.PLLR         = 2;
+    oscInit.PLL.PLLRGE       = PLL1_VCIRANGE;
+    oscInit.PLL.PLLVCOSEL    = RCC_PLL1_VCORANGE_WIDE;
+    oscInit.PLL.PLLFRACN     = 0;
+
+    HAL_StatusTypeDef status = HAL_RCC_OscConfig(&oscInit);
+
+    if (status == HAL_OK) {
+        RCC_ClkInitTypeDef clkInit = {0};
+        clkInit.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                 RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
+                                 RCC_CLOCKTYPE_PCLK3;
+        clkInit.SYSCLKSource   = RCC_SYSCLKSOURCE_PLLCLK;
+        clkInit.AHBCLKDivider  = RCC_HCLK_DIV1;
+        clkInit.APB1CLKDivider = RCC_HCLK_DIV1;
+        clkInit.APB2CLKDivider = RCC_HCLK_DIV1;
+        clkInit.APB3CLKDivider = RCC_HCLK_DIV1;
+        if (HAL_RCC_ClockConfig(&clkInit, FLASH_LATENCY_5) != HAL_OK) {
+            while (1) { }
+        }
+
+        // HAL_RCC_OscConfig only enables the PLL1 P output (system clock). H5
+        // peripherals such as SPI1/2/3 default their kernel clock to pll1_q_ck
+        // (RCC_SPIxCLKSOURCE_PLL1Q == SPIxSEL reset value 0); SDMMC and others
+        // likewise. Without the Q output enabled those peripherals get no kernel
+        // clock and block forever on their first transfer (e.g. gyro SPI detect
+        // spins waiting for TXP/EOT). Enable Q (125 MHz) and R (250 MHz) now that
+        // PLL1 is locked — this mirrors what HAL_RCCEx_PeriphCLKConfig does when a
+        // peripheral selects PLL1Q.
+        __HAL_RCC_PLL1_CLKOUT_ENABLE(RCC_PLL1_DIVQ | RCC_PLL1_DIVR);
+    } else {
+        // HSE did not lock. Fall back to HSI 64 MHz so the platform stays
+        // diagnosable (1 WS at VOS0 covers HSI64 per Table 39).
+        RCC_OscInitTypeDef hsi = {0};
+        hsi.OscillatorType      = RCC_OSCILLATORTYPE_HSI | RCC_OSCILLATORTYPE_HSI48;
+        hsi.HSIState            = RCC_HSI_ON;
+        hsi.HSIDiv              = RCC_HSI_DIV1;
+        hsi.HSICalibrationValue = RCC_HSICALIBRATION_DEFAULT;
+        hsi.HSI48State          = RCC_HSI48_ON;
+        hsi.PLL.PLLState        = RCC_PLL_NONE;
+        if (HAL_RCC_OscConfig(&hsi) != HAL_OK) {
+            while (1) { }
+        }
+
+        RCC_ClkInitTypeDef clkInit = {0};
+        clkInit.ClockType      = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
+                                 RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2 |
+                                 RCC_CLOCKTYPE_PCLK3;
+        clkInit.SYSCLKSource   = RCC_SYSCLKSOURCE_HSI;
+        clkInit.AHBCLKDivider  = RCC_HCLK_DIV1;
+        clkInit.APB1CLKDivider = RCC_HCLK_DIV1;
+        clkInit.APB2CLKDivider = RCC_HCLK_DIV1;
+        clkInit.APB3CLKDivider = RCC_HCLK_DIV1;
+        if (HAL_RCC_ClockConfig(&clkInit, FLASH_LATENCY_1) != HAL_OK) {
+            while (1) { }
+        }
+    }
+
+    RCC_PeriphCLKInitTypeDef pclkInit = {0};
+    pclkInit.PeriphClockSelection = RCC_PERIPHCLK_USB;
+    pclkInit.UsbClockSelection    = RCC_USBCLKSOURCE_HSI48;
+    if (HAL_RCCEx_PeriphCLKConfig(&pclkInit) != HAL_OK) {
+        while (1) { }
+    }
+
+    // Discipline HSI48 against the USB SOF every 1 ms.
+    __HAL_RCC_CRS_CLK_ENABLE();
+    RCC_CRSInitTypeDef crsInit = {
+        .Prescaler             = RCC_CRS_SYNC_DIV1,
+        .Source                = RCC_CRS_SYNC_SOURCE_USB,
+        .Polarity              = RCC_CRS_SYNC_POLARITY_RISING,
+        .ReloadValue           = RCC_CRS_RELOADVALUE_DEFAULT,
+        .ErrorLimitValue       = RCC_CRS_ERRORLIMIT_DEFAULT,
+        .HSI48CalibrationValue = RCC_CRS_HSI48CALIBRATION_DEFAULT,
+    };
+    HAL_RCCEx_CRSConfig(&crsInit);
+}
+
+/**
+  * @brief  Setup the microcontroller system.
+  * @param  None
+  * @retval None
+  */
+
+static void initialiseDmaMemorySections(void)
+{
+    extern uint8_t _sdmaram_bss;
+    extern uint8_t _edmaram_bss;
+    extern uint8_t _sdmaram_data;
+    extern uint8_t _edmaram_data;
+    extern uint8_t _sdmaram_idata;
+    bzero(&_sdmaram_bss, (size_t) (&_edmaram_bss - &_sdmaram_bss));
+    memcpy(&_sdmaram_data, &_sdmaram_idata, (size_t) (&_edmaram_data - &_sdmaram_data));
+}
+
+void SystemInit(void)
+{
+  uint32_t reg_opsr;
+
+  /* FPU settings ------------------------------------------------------------*/
+  #if (__FPU_PRESENT == 1) && (__FPU_USED == 1)
+   SCB->CPACR |= ((3UL << 20U)|(3UL << 22U));  /* set CP10 and CP11 Full Access */
+  #endif
+
+  /* Reset the RCC clock configuration to the default reset state ------------*/
+  /* Set HSION bit */
+  RCC->CR = RCC_CR_HSION;
+
+  /* Reset CFGR register */
+  RCC->CFGR1 = 0U;
+  RCC->CFGR2 = 0U;
+
+  /* Reset HSEON, HSECSSON, HSEBYP, HSEEXT, HSIDIV, HSIKERON, CSION, CSIKERON, HSI48 and PLLxON bits */
+#if defined(RCC_CR_PLL3ON)
+  RCC->CR &= ~(RCC_CR_HSEON | RCC_CR_HSECSSON | RCC_CR_HSEBYP | RCC_CR_HSEEXT | RCC_CR_HSIDIV | RCC_CR_HSIKERON | \
+               RCC_CR_CSION | RCC_CR_CSIKERON |RCC_CR_HSI48ON | RCC_CR_PLL1ON | RCC_CR_PLL2ON | RCC_CR_PLL3ON);
+#else
+  RCC->CR &= ~(RCC_CR_HSEON | RCC_CR_HSECSSON | RCC_CR_HSEBYP | RCC_CR_HSEEXT | RCC_CR_HSIDIV | RCC_CR_HSIKERON | \
+               RCC_CR_CSION | RCC_CR_CSIKERON |RCC_CR_HSI48ON | RCC_CR_PLL1ON | RCC_CR_PLL2ON);
+#endif
+
+  /* Reset PLLxCFGR register */
+  RCC->PLL1CFGR = 0U;
+  RCC->PLL2CFGR = 0U;
+#if defined(RCC_CR_PLL3ON)
+  RCC->PLL3CFGR = 0U;
+#endif /* RCC_CR_PLL3ON */
+
+  /* Reset PLL1DIVR register */
+  RCC->PLL1DIVR = 0x01010280U;
+  /* Reset PLL1FRACR register */
+  RCC->PLL1FRACR = 0x00000000U;
+  /* Reset PLL2DIVR register */
+  RCC->PLL2DIVR = 0x01010280U;
+  /* Reset PLL2FRACR register */
+  RCC->PLL2FRACR = 0x00000000U;
+#if defined(RCC_CR_PLL3ON)
+  /* Reset PLL3DIVR register */
+  RCC->PLL3DIVR = 0x01010280U;
+  /* Reset PLL3FRACR register */
+  RCC->PLL3FRACR = 0x00000000U;
+#endif /* RCC_CR_PLL3ON */
+
+  /* Reset HSEBYP bit */
+  RCC->CR &= ~(RCC_CR_HSEBYP);
+
+  /* Disable all interrupts */
+  RCC->CIER = 0U;
+
+  /* Configure the Vector Table location add offset address ------------------*/
+  #ifdef VECT_TAB_SRAM
+    SCB->VTOR = SRAM1_BASE | VECT_TAB_OFFSET; /* Vector Table Relocation in Internal SRAM */
+  #else
+    SCB->VTOR = FLASH_BASE | VECT_TAB_OFFSET; /* Vector Table Relocation in Internal FLASH */
+  #endif /* VECT_TAB_SRAM */
+
+  /* Check OPSR register to verify if there is an ongoing swap or option bytes update interrupted by a reset */
+  reg_opsr = FLASH->OPSR & FLASH_OPSR_CODE_OP;
+  if ((reg_opsr == FLASH_OPSR_CODE_OP) || (reg_opsr == (FLASH_OPSR_CODE_OP_2 | FLASH_OPSR_CODE_OP_1)))
+  {
+    /* Check FLASH Option Control Register access */
+    if ((FLASH->OPTCR & FLASH_OPTCR_OPTLOCK) != 0U)
+    {
+      /* Authorizes the Option Byte registers programming */
+      FLASH->OPTKEYR = 0x08192A3BU;
+      FLASH->OPTKEYR = 0x4C5D6E7FU;
+    }
+    /* Launch the option bytes change operation */
+    FLASH->OPTCR |= FLASH_OPTCR_OPTSTART;
+
+    /* Lock the FLASH Option Control Register access */
+    FLASH->OPTCR |= FLASH_OPTCR_OPTLOCK;
+  }
+
+#ifdef USE_HAL_DRIVER
+  HAL_Init();
+#endif
+
+  SystemClock_Config();
+  SystemCoreClockUpdate();
+
+  initialiseDmaMemorySections();
+
+  systemProcessResetReason();
+}
+
+/**
+  * @brief  Update SystemCoreClock variable according to Clock Register Values.
+  *         The SystemCoreClock variable contains the core clock (HCLK), it can
+  *         be used by the user application to setup the SysTick timer or configure
+  *         other parameters.
+  *
+  * @note   Each time the core clock (HCLK) changes, this function must be called
+  *         to update SystemCoreClock variable value. Otherwise, any configuration
+  *         based on this variable will be incorrect.
+  *
+  * @note   - The system frequency computed by this function is not the real
+  *           frequency in the chip. It is calculated based on the predefined
+  *           constant and the selected clock source:
+  *
+  *           - If SYSCLK source is CSI, SystemCoreClock will contain the CSI_VALUE(*)
+  *
+  *           - If SYSCLK source is HSI, SystemCoreClock will contain the HSI_VALUE(**)
+  *
+  *           - If SYSCLK source is HSE, SystemCoreClock will contain the HSE_VALUE(***)
+  *
+  *           - If SYSCLK source is PLL, SystemCoreClock will contain the HSE_VALUE(***)
+  *             or HSI_VALUE(**) or CSI_VALUE(*) multiplied/divided by the PLL factors.
+  *
+  *         (*) CSI_VALUE is a constant defined in stm32h5xx_hal.h file (default value
+  *             4 MHz) but the real value may vary depending on the variations
+  *             in voltage and temperature.
+  *
+  *         (**) HSI_VALUE is a constant defined in stm32h5xx_hal.h file (default value
+  *              64 MHz) but the real value may vary depending on the variations
+  *              in voltage and temperature.
+  *
+  *         (***) HSE_VALUE is a constant defined in stm32h5xx_hal.h file (default value
+  *              25 MHz), user has to ensure that HSE_VALUE is same as the real
+  *              frequency of the crystal used. Otherwise, this function may
+  *              have wrong result.
+  *
+  *         - The result of this function could be not correct when using fractional
+  *           value for HSE crystal.
+  *
+  * @param  None
+  * @retval None
+  */
+void SystemCoreClockUpdate(void)
+{
+  uint32_t pllp, pllsource, pllm, pllfracen, hsivalue, tmp;
+  float_t fracn1, pllvco;
+
+  /* Get SYSCLK source -------------------------------------------------------*/
+  switch (RCC->CFGR1 & RCC_CFGR1_SWS)
+  {
+  case 0x00UL:  /* HSI used as system clock source */
+    SystemCoreClock = (uint32_t) (HSI_VALUE >> ((RCC->CR & RCC_CR_HSIDIV)>> 3));
+    break;
+
+  case 0x08UL:  /* CSI used as system clock  source */
+    SystemCoreClock = CSI_VALUE;
+    break;
+
+  case 0x10UL:  /* HSE used as system clock  source */
+    SystemCoreClock = HSE_VALUE;
+    break;
+
+  case 0x18UL:  /* PLL1 used as system clock source */
+    /* PLL_VCO = (HSE_VALUE or HSI_VALUE or CSI_VALUE/ PLLM) * PLLN
+    SYSCLK = PLL_VCO / PLLR
+    */
+    pllsource = (RCC->PLL1CFGR & RCC_PLL1CFGR_PLL1SRC);
+    pllm = ((RCC->PLL1CFGR & RCC_PLL1CFGR_PLL1M)>> RCC_PLL1CFGR_PLL1M_Pos);
+    pllfracen = ((RCC->PLL1CFGR & RCC_PLL1CFGR_PLL1FRACEN)>>RCC_PLL1CFGR_PLL1FRACEN_Pos);
+    fracn1 = (float_t)(uint32_t)(pllfracen* ((RCC->PLL1FRACR & RCC_PLL1FRACR_PLL1FRACN)>> RCC_PLL1FRACR_PLL1FRACN_Pos));
+
+    switch (pllsource)
+    {
+    case 0x01UL:  /* HSI used as PLL clock source */
+      hsivalue = (HSI_VALUE >> ((RCC->CR & RCC_CR_HSIDIV)>> 3)) ;
+      pllvco = ((float_t)hsivalue / (float_t)pllm) * ((float_t)(uint32_t)(RCC->PLL1DIVR & RCC_PLL1DIVR_PLL1N) + \
+                (fracn1/(float_t)0x2000) +(float_t)1 );
+      break;
+
+    case 0x02UL:  /* CSI used as PLL clock source */
+      pllvco = ((float_t)CSI_VALUE / (float_t)pllm) * ((float_t)(uint32_t)(RCC->PLL1DIVR & RCC_PLL1DIVR_PLL1N) + \
+                (fracn1/(float_t)0x2000) +(float_t)1 );
+      break;
+
+    case 0x03UL:  /* HSE used as PLL clock source */
+      pllvco = ((float_t)HSE_VALUE / (float_t)pllm) * ((float_t)(uint32_t)(RCC->PLL1DIVR & RCC_PLL1DIVR_PLL1N) + \
+                (fracn1/(float_t)0x2000) +(float_t)1 );
+      break;
+
+    default:  /* No clock sent to PLL*/
+      pllvco = (float_t) 0U;
+      break;
+    }
+
+    pllp = (((RCC->PLL1DIVR & RCC_PLL1DIVR_PLL1P) >>RCC_PLL1DIVR_PLL1P_Pos) + 1U ) ;
+    SystemCoreClock =  (uint32_t)(float_t)(pllvco/(float_t)pllp);
+
+    break;
+
+  default:
+    SystemCoreClock = HSI_VALUE;
+    break;
+  }
+  /* Compute HCLK clock frequency --------------------------------------------*/
+  /* Get HCLK prescaler */
+  tmp = AHBPrescTable[((RCC->CFGR2 & RCC_CFGR2_HPRE) >> RCC_CFGR2_HPRE_Pos)];
+  /* HCLK clock frequency */
+  SystemCoreClock >>= tmp;
+}
+
+/**
+  * @}
+  */
+
+/**
+  * @}
+  */
+
+/**
+  * @}
+  */
+

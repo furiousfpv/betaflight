@@ -1,0 +1,48 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Betaflight. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#ifdef USE_WING
+
+#include "pg/alt_hold.h"
+
+#ifdef USE_ALTITUDE_HOLD
+#include "common/time.h"
+
+#define ALTHOLD_TASK_RATE_HZ 100         // hz
+
+void altHoldInit(void);
+
+// The configured rate a climb or descent runs at when it does not state its own (cm/s).
+float altHoldGetClimbRateCmS(void);
+
+// Command an emergency descent at rateCmS; alt hold owns the throttle while it runs.
+void altHoldSetEmergencyDescent(bool active, float rateCmS);
+// Coming down to land where it is, the ground has been met and the throttle is closed.
+bool altHoldGroundContact(void);
+
+bool altHoldUpdateCheck(timeUs_t currentTimeUs, timeDelta_t currentDeltaTimeUs);
+void updateAltHold(timeUs_t currentTimeUs);
+bool isAltHoldActive(void);
+
+#ifdef UNIT_TEST
+float altHoldGetTargetAltitudeCm(void);
+#endif
+
+#endif // USE_ALTITUDE_HOLD
+#endif // USE_WING

@@ -1,0 +1,131 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "platform.h"
+
+#include "flight/autopilot.h"
+
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
+
+#include "autopilot.h"
+
+#define AUTOPILOT_CONFIG_VERSION 13
+
+#ifdef USE_WING
+// one version ahead in the 4 bit field, so a wing flashed over a build that hid these settings starts from the wing defaults
+#define AUTOPILOT_CONFIG_VERSION_BUILD ((AUTOPILOT_CONFIG_VERSION + 1) & 0xf)
+#define DEFAULT_WAYPOINT_ARRIVAL_RADIUS 1000    // 10m: a wing passes a waypoint at speed
+#define DEFAULT_GEOFENCE_ACTION AP_GEOFENCE_RTH
+#define DEFAULT_LANDING_DESCENT_RATE 200        // a wing comes down its loiter over the touchdown at 2 m/s
+#define DEFAULT_LANDING_DETECTION_TIME 20       // a wing sits still for 2 s on the ground before it is landed
+#else
+#define DEFAULT_WAYPOINT_ARRIVAL_RADIUS 500     // 5m for FLYOVER/FLYBY
+#define DEFAULT_GEOFENCE_ACTION AP_GEOFENCE_LAND // Land at current position
+#define DEFAULT_LANDING_DESCENT_RATE 50         // 50 cm/s = 0.5 m/s descent rate
+#define DEFAULT_LANDING_DETECTION_TIME 10       // 1 second below landing altitude for touchdown
+#define AUTOPILOT_CONFIG_VERSION_BUILD AUTOPILOT_CONFIG_VERSION
+#endif
+
+PG_REGISTER_WITH_RESET_TEMPLATE(autopilotConfig_t, autopilotConfig, PG_AUTOPILOT, AUTOPILOT_CONFIG_VERSION_BUILD);
+
+PG_RESET_TEMPLATE(autopilotConfig_t, autopilotConfig,
+    .landingAltitudeM = 4,
+    .hoverThrottle = 1275,
+    .throttleMin = 1100,
+    .throttleMax = 1900,
+    .altitudeP = 30,
+    .altitudeI = 30,
+    .altitudeD = 30,
+    .altitudeA = 30,
+    .altitudeF = 30,
+    .positionP = 30,
+    .positionI = 30,
+    .positionD = 30,
+    .positionA = 30,
+    .positionF = 30,
+    .positionCutoff = 30,
+    .stopThreshold = 10,
+    .maxAngle = 50,
+
+    // Velocity-based position control with drag compensation
+    .velocityDragCoeff = 50,          // 5 deg at 5 m/s, half the nominal maximum
+    .maxVelocity = 500,               // 5 m/s max velocity setpoint at full stick
+
+    // Waypoint navigation parameters
+    .waypointArrivalRadius = DEFAULT_WAYPOINT_ARRIVAL_RADIUS,
+    .waypointHoldRadius = 200,        // 2m for HOLD/LAND
+    .stickDeadband = 50,              // RC units
+    .throttleDeadband = 50,           // RC units
+
+    // Leg-line carrot path tracking and turn-angle cornering
+    .navCornerSpeed = 220,            // 2.2 m/s corner-speed floor
+    .navCornerDeltaV = 440,           // 4.4 m/s per-corner delta-v budget
+    .navDecel = 250,                  // 2.5 m/s^2 approach deceleration; with the lag
+                                      // compensated profile this stays trackable, and long legs
+                                      // no longer begin braking hundreds of metres out
+    .navAccel = 250,                  // 2.5 m/s^2 carrot acceleration, turning and speeding up,
+                                      // and the ramp a point leg's commanded velocity changes at
+    .navCarrotLeadTime = 12,          // 1.2 s carrot look-ahead onto the leg line
+    .navCarrotLeadMax = 2500,         // 25 m maximum carrot look-ahead
+    .navPreturnDist = 1500,           // 15 m pre-turn blend zone
+
+    // Yaw control parameters
+    .yawMode = YAW_MODE_VELOCITY,     // Default: follow velocity
+    .yawP = 30,                       // 1.8 P gain
+    .maxYawRate = 150,                 // 150 deg/s max
+    .minForwardVelocity = 300,        // 3.0 m/s minimum forward velocity (GPS course reliability / stall prevention)
+
+    // Velocity buildup (acceleration from stationary)
+    .velocityBuildupMaxPitch = 8,     // 8° max pitch bias for acceleration
+
+    // Turn rate and holding patterns
+    .maxTurnRate = 3,                 // 3 deg/s = rate-1 turn (360° in 2 minutes)
+    .holdOrbitRadius = 1000,          // 10m orbit radius
+    .holdFigure8Width = 2000,         // 20m figure-8 width
+
+    // Landing sequence
+    .landingDescentRate = DEFAULT_LANDING_DESCENT_RATE,
+    .landingDetectionTime = DEFAULT_LANDING_DETECTION_TIME,
+    .landingSpiralEnable = 1,         // Spiral descent enabled (avoid vortex ring state)
+    .landingSpiralRadius = 200,       // 2m spiral radius
+    .landingSpiralRate = 10,          // 10 deg/s rotation rate
+    .landingVelocityThreshold = 50,   // 0.5 m/s max velocity for touchdown
+    .landingThrottleThreshold = 100,  // 100 RC units throttle deviation
+
+    // L1 Nonlinear Guidance
+    .l1Enable = 1,                    // L1 guidance enabled by default
+    .l1Period = 20,                   // 2.0s damping period
+    .l1MinLookahead = 1000,           // 10m minimum lookahead
+    .l1MaxLookahead = 10000,          // 100m maximum lookahead
+    .l1MaxCrossTrackError = 10000,    // 100m max XTE before fallback
+    .l1TurnRate = 8,                  // 8 deg/s arc transition rate between waypoints
+
+    // Vertical track
+    .minNavAltitudeM = 5,                 // 5m AGL before horizontal navigation begins
+
+    // Safety: RX loss policy
+    .rxLossPolicy = AP_RX_LOSS_DISABLE,  // Disable autopilot on RX loss (use standard failsafe)
+
+    // Safety: Geofence
+    .maxDistanceFromHomeM = 0,            // Disabled by default
+    .geofenceAction = DEFAULT_GEOFENCE_ACTION,
+);

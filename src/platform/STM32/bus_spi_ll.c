@@ -1,0 +1,959 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "platform.h"
+
+#if defined(USE_SPI)
+
+#include "common/utils.h"
+#include "common/maths.h"
+
+#include "drivers/bus.h"
+#include "drivers/bus_spi_types.h"
+#include "drivers/bus_spi.h"
+#include "drivers/bus_spi_impl.h"
+#include "drivers/dma.h"
+#include "platform/dma.h"
+#include "drivers/io.h"
+#include "platform/rcc.h"
+#if SPI_TRAIT_HANDLE
+#include "platform/bus_spi_hal.h"
+#endif
+
+// Use DMA if possible if this many bytes are to be transferred
+#define SPI_DMA_THRESHOLD 8
+
+#if defined(STM32H7)
+/* BDMA can only reach D3 SRAM4, where no driver buffer lives, so BDMA transfers are staged
+ * through bounce buffers in .BDMA_RAM: TX is copied in as each segment starts and RX copied
+ * out as it completes. Only SPI6 is served by BDMA, so a single pair is enough. Segments
+ * longer than this fall back to polled transfers.
+ */
+#define SPI_BDMA_BUFFER_SIZE 512
+
+static BDMA_RAM uint8_t bdmaTxBuffer[SPI_BDMA_BUFFER_SIZE];
+static BDMA_RAM uint8_t bdmaRxBuffer[SPI_BDMA_BUFFER_SIZE];
+#endif
+
+#ifndef SPI1_NSS_PIN
+#define SPI1_NSS_PIN NONE
+#endif
+#ifndef SPI2_NSS_PIN
+#define SPI2_NSS_PIN NONE
+#endif
+#ifndef SPI3_NSS_PIN
+#define SPI3_NSS_PIN NONE
+#endif
+#ifndef SPI4_NSS_PIN
+#define SPI4_NSS_PIN NONE
+#endif
+
+#define SPI_DEFAULT_TIMEOUT 10
+
+#ifdef STM32H7
+#define IS_DTCM(p) (((uint32_t)p & 0xfffe0000) == 0x20000000)
+#elif defined(STM32F7)
+#define IS_DTCM(p) (((uint32_t)p & 0xffff0000) == 0x20000000)
+#elif defined(STM32G4)
+#define IS_CCM(p) ((((uint32_t)p & 0xffff8000) == 0x10000000) || (((uint32_t)p & 0xffff8000) == 0x20018000))
+#elif defined(STM32H5)
+// H5 has no DTCM/CCM restrictions for DMA
+#define IS_DTCM(p) (0)
+#elif defined(STM32N6)
+// N6 has no DTCM/CCM restrictions for DMA
+#define IS_DTCM(p) (0)
+#endif
+#if SPI_TRAIT_HANDLE
+static struct spiHalHandle_s spiHalHandles[SPIDEV_COUNT];
+#endif
+
+static LL_SPI_InitTypeDef defaultInit =
+{
+    .TransferDirection = LL_SPI_FULL_DUPLEX,
+    .Mode = LL_SPI_MODE_MASTER,
+    .DataWidth = LL_SPI_DATAWIDTH_8BIT,
+    .NSS = LL_SPI_NSS_SOFT,
+    .BaudRate = LL_SPI_BAUDRATEPRESCALER_DIV8,
+    .BitOrder = LL_SPI_MSB_FIRST,
+    .CRCCalculation = LL_SPI_CRCCALCULATION_DISABLE,
+    .ClockPolarity = LL_SPI_POLARITY_HIGH,
+    .ClockPhase = LL_SPI_PHASE_2EDGE,
+};
+
+static uint32_t spiDivisorToBRbits(const SPI_TypeDef *instance, uint16_t divisor)
+{
+#if defined(STM32F7)
+    /* On F7 we run SPI2 and SPI3 (on the APB1 bus) at a division of PCLK1 which is
+     * half that of HCLK driving the APB2 bus and SPI1. So we need to reduce the
+     * division factors for SPI2/3 by a corresponding factor of 2.
+     */
+    if (instance == SPI2 || instance == SPI3) {
+        divisor /= 2; // Safe for divisor == 0 or 1
+    }
+#else
+    // On the G4 and H7 processors the SPI busses are all derived from the same base frequency
+    UNUSED(instance);
+#endif
+
+    divisor = constrain(divisor, 2, 256);
+
+#if defined(STM32H7) || defined(STM32H5) || defined(STM32N6)
+    const uint32_t baudRatePrescaler[8] = {
+        LL_SPI_BAUDRATEPRESCALER_DIV2,
+        LL_SPI_BAUDRATEPRESCALER_DIV4,
+        LL_SPI_BAUDRATEPRESCALER_DIV8,
+        LL_SPI_BAUDRATEPRESCALER_DIV16,
+        LL_SPI_BAUDRATEPRESCALER_DIV32,
+        LL_SPI_BAUDRATEPRESCALER_DIV64,
+        LL_SPI_BAUDRATEPRESCALER_DIV128,
+        LL_SPI_BAUDRATEPRESCALER_DIV256,
+    };
+    int prescalerIndex = ffs(divisor) - 2; // prescaler begins at "/2"
+
+    return baudRatePrescaler[prescalerIndex];
+#else
+    return (ffs(divisor) - 2) << SPI_CR1_BR_Pos;
+#endif
+}
+
+void spiInitDevice(spiDevice_e device)
+{
+    spiDevice_t *spi = &spiDevice[device];
+
+    if (!spi->dev) {
+        return;
+    }
+
+#if SPI_TRAIT_HANDLE
+    spi->halHandle = &spiHalHandles[device];
+#endif
+
+    SPI_TypeDef *dev = (SPI_TypeDef *)spi->dev;
+
+    // Enable SPI clock
+    RCC_ClockCmd(spi->rcc, ENABLE);
+    RCC_ResetCmd(spi->rcc, ENABLE);
+
+    IOInit(IOGetByTag(spi->sck),  OWNER_SPI_SCK, RESOURCE_INDEX(device));
+    IOInit(IOGetByTag(spi->miso), OWNER_SPI_SDI, RESOURCE_INDEX(device));
+    IOInit(IOGetByTag(spi->mosi), OWNER_SPI_SDO, RESOURCE_INDEX(device));
+
+    IOConfigGPIOAF(IOGetByTag(spi->miso), SPI_IO_AF_SDI_CFG, spi->misoAF);
+    IOConfigGPIOAF(IOGetByTag(spi->mosi), SPI_IO_AF_CFG, spi->mosiAF);
+    IOConfigGPIOAF(IOGetByTag(spi->sck), SPI_IO_AF_SCK_CFG_HIGH, spi->sckAF);
+
+    LL_SPI_Disable(dev);
+    LL_SPI_DeInit(dev);
+
+#if defined(STM32H5) || defined(STM32H7) || defined(STM32N6)
+    // Prevent glitching when SPI is disabled
+    LL_SPI_EnableGPIOControl(dev);
+
+    LL_SPI_SetFIFOThreshold(dev, LL_SPI_FIFO_TH_01DATA);
+    LL_SPI_Init(dev, &defaultInit);
+#else
+    LL_SPI_SetRxFIFOThreshold(dev, SPI_RXFIFO_THRESHOLD_QF);
+
+    LL_SPI_Init(dev, &defaultInit);
+    LL_SPI_Enable(dev);
+#endif
+}
+
+void spiInternalResetDescriptors(busDevice_t *bus)
+{
+#if defined(STM32H5)
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+    LL_DMA_InitTypeDef *dmaInitTx = bus->dmaInitTx;
+
+    memset(dmaInitTx, 0, sizeof(*dmaInitTx));
+    dmaInitTx->Request = bus->dmaTx->channel;
+    dmaInitTx->BlkHWRequest = LL_DMA_HWREQUEST_SINGLEBURST;
+    dmaInitTx->Direction = LL_DMA_DIRECTION_MEMORY_TO_PERIPH;
+    dmaInitTx->SrcIncMode = LL_DMA_SRC_INCREMENT;
+    dmaInitTx->DestIncMode = LL_DMA_DEST_FIXED;
+    dmaInitTx->SrcDataWidth = LL_DMA_SRC_DATAWIDTH_BYTE;
+    dmaInitTx->DestDataWidth = LL_DMA_DEST_DATAWIDTH_BYTE;
+    dmaInitTx->SrcBurstLength = 1;
+    dmaInitTx->DestBurstLength = 1;
+    dmaInitTx->Priority = LL_DMA_LOW_PRIORITY_LOW_WEIGHT;
+    dmaInitTx->DataAlignment = LL_DMA_DATA_ALIGN_ZEROPADD;
+    dmaInitTx->Mode = LL_DMA_NORMAL;
+    dmaInitTx->DestAddress = (uint32_t)&instance->TXDR;
+
+    if (bus->dmaRx) {
+        LL_DMA_InitTypeDef *dmaInitRx = bus->dmaInitRx;
+
+        memset(dmaInitRx, 0, sizeof(*dmaInitRx));
+        dmaInitRx->Request = bus->dmaRx->channel;
+        dmaInitRx->BlkHWRequest = LL_DMA_HWREQUEST_SINGLEBURST;
+        dmaInitRx->Direction = LL_DMA_DIRECTION_PERIPH_TO_MEMORY;
+        dmaInitRx->SrcIncMode = LL_DMA_SRC_FIXED;
+        dmaInitRx->DestIncMode = LL_DMA_DEST_INCREMENT;
+        dmaInitRx->SrcDataWidth = LL_DMA_SRC_DATAWIDTH_BYTE;
+        dmaInitRx->DestDataWidth = LL_DMA_DEST_DATAWIDTH_BYTE;
+        dmaInitRx->SrcBurstLength = 1;
+        dmaInitRx->DestBurstLength = 1;
+        dmaInitRx->Priority = LL_DMA_LOW_PRIORITY_MID_WEIGHT;
+        dmaInitRx->DataAlignment = LL_DMA_DATA_ALIGN_ZEROPADD;
+        dmaInitRx->Mode = LL_DMA_NORMAL;
+        dmaInitRx->SrcAddress = (uint32_t)&instance->RXDR;
+    }
+#elif defined(STM32N6)
+    // TODO: GPDMA uses a completely different LL_DMA API; SPI DMA not yet supported
+    UNUSED(bus);
+#else
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+    LL_DMA_InitTypeDef *dmaInitTx = bus->dmaInitTx;
+
+#if defined(STM32H7)
+    if (IS_BDMA_DESCRIPTOR(bus->dmaTx)) {
+        // BDMA channel-based init for D3 domain peripherals (e.g., SPI6)
+        memset(dmaInitTx, 0, sizeof(*dmaInitTx));
+        dmaInitTx->PeriphRequest = bus->dmaTx->channel;
+        dmaInitTx->Direction = LL_BDMA_DIRECTION_MEMORY_TO_PERIPH;
+        dmaInitTx->PeriphOrM2MSrcAddress = (uint32_t)&instance->TXDR;
+
+        if (bus->dmaRx) {
+            LL_DMA_InitTypeDef *dmaInitRx = bus->dmaInitRx;
+            memset(dmaInitRx, 0, sizeof(*dmaInitRx));
+            dmaInitRx->PeriphRequest = bus->dmaRx->channel;
+            dmaInitRx->PeriphOrM2MSrcAddress = (uint32_t)&instance->RXDR;
+            dmaInitRx->Priority = LL_BDMA_PRIORITY_MEDIUM;
+        }
+        return;
+    }
+#endif
+
+    LL_DMA_StructInit(dmaInitTx);
+#if defined(STM32G4) || defined(STM32H7)
+    dmaInitTx->PeriphRequest = bus->dmaTx->channel;
+#else
+    dmaInitTx->Channel = bus->dmaTx->channel;
+#endif
+    dmaInitTx->Mode = LL_DMA_MODE_NORMAL;
+    dmaInitTx->Direction = LL_DMA_DIRECTION_MEMORY_TO_PERIPH;
+#if defined(STM32H7)
+    dmaInitTx->PeriphOrM2MSrcAddress = (uint32_t)&instance->TXDR;
+#else
+    dmaInitTx->PeriphOrM2MSrcAddress = (uint32_t)&instance->DR;
+#endif
+    dmaInitTx->Priority = LL_DMA_PRIORITY_LOW;
+    dmaInitTx->PeriphOrM2MSrcIncMode  = LL_DMA_PERIPH_NOINCREMENT;
+    dmaInitTx->PeriphOrM2MSrcDataSize = LL_DMA_PDATAALIGN_BYTE;
+    dmaInitTx->MemoryOrM2MDstDataSize = LL_DMA_MDATAALIGN_BYTE;
+
+    if (bus->dmaRx) {
+        LL_DMA_InitTypeDef *dmaInitRx = bus->dmaInitRx;
+
+        LL_DMA_StructInit(dmaInitRx);
+#if defined(STM32G4) || defined(STM32H7)
+        dmaInitRx->PeriphRequest = bus->dmaRx->channel;
+#else
+        dmaInitRx->Channel = bus->dmaRx->channel;
+#endif
+        dmaInitRx->Mode = LL_DMA_MODE_NORMAL;
+        dmaInitRx->Direction = LL_DMA_DIRECTION_PERIPH_TO_MEMORY;
+#if defined(STM32H7)
+        dmaInitRx->PeriphOrM2MSrcAddress = (uint32_t)&instance->RXDR;
+#else
+        dmaInitRx->PeriphOrM2MSrcAddress = (uint32_t)&instance->DR;
+#endif
+        dmaInitRx->Priority = LL_DMA_PRIORITY_MEDIUM;
+        dmaInitRx->PeriphOrM2MSrcIncMode  = LL_DMA_PERIPH_NOINCREMENT;
+        dmaInitRx->PeriphOrM2MSrcDataSize = LL_DMA_PDATAALIGN_BYTE;
+    }
+#endif // !STM32N6
+}
+
+void spiInternalResetStream(dmaChannelDescriptor_t *descriptor)
+{
+    // Disable the stream
+#if defined(STM32G4) || defined(STM32H5) || defined(STM32N6)
+    LL_DMA_DisableChannel(descriptor->dma, descriptor->stream);
+    while (LL_DMA_IsEnabledChannel(descriptor->dma, descriptor->stream));
+#else
+#if defined(STM32H7)
+    if (IS_BDMA_DESCRIPTOR(descriptor)) {
+        LL_BDMA_DisableChannel(descriptor->dma, descriptor->stream);
+        while (LL_BDMA_IsEnabledChannel(descriptor->dma, descriptor->stream));
+    } else
+#endif
+    {
+        LL_DMA_DisableStream(descriptor->dma, descriptor->stream);
+        while (LL_DMA_IsEnabledStream(descriptor->dma, descriptor->stream));
+    }
+#endif
+
+    // Clear any pending interrupt flags
+    DMA_CLEAR_FLAG(descriptor, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+}
+
+FAST_CODE bool spiInternalReadWriteBufPolled(spiResource_t *spiInstance, const uint8_t *txData, uint8_t *rxData, int len)
+{
+    SPI_TypeDef *instance = (SPI_TypeDef *)spiInstance;
+#if defined(STM32H7) || defined(STM32H5) || defined(STM32N6)
+    LL_SPI_SetTransferSize(instance, len);
+    LL_SPI_Enable(instance);
+    LL_SPI_StartMasterTransfer(instance);
+    while (len) {
+        while (!LL_SPI_IsActiveFlag_TXP(instance));
+        uint8_t b = txData ? *(txData++) : 0xFF;
+        LL_SPI_TransmitData8(instance, b);
+
+        while (!LL_SPI_IsActiveFlag_RXP(instance));
+        b = LL_SPI_ReceiveData8(instance);
+        if (rxData) {
+            *(rxData++) = b;
+        }
+        --len;
+    }
+    while (!LL_SPI_IsActiveFlag_EOT(instance));
+    LL_SPI_ClearFlag_TXTF(instance);
+    LL_SPI_Disable(instance);
+#else
+    // set 16-bit transfer
+    CLEAR_BIT(instance->CR2, SPI_RXFIFO_THRESHOLD);
+    while (len > 1) {
+        while (!LL_SPI_IsActiveFlag_TXE(instance));
+        uint16_t w;
+        if (txData) {
+            w = *((uint16_t *)txData);
+            txData += 2;
+        } else {
+            w = 0xFFFF;
+        }
+        LL_SPI_TransmitData16(instance, w);
+
+        while (!LL_SPI_IsActiveFlag_RXNE(instance));
+        w = LL_SPI_ReceiveData16(instance);
+        if (rxData) {
+            *((uint16_t *)rxData) = w;
+            rxData += 2;
+        }
+        len -= 2;
+    }
+    // set 8-bit transfer
+    SET_BIT(instance->CR2, SPI_RXFIFO_THRESHOLD);
+    if (len) {
+        while (!LL_SPI_IsActiveFlag_TXE(instance));
+        uint8_t b = txData ? *(txData++) : 0xFF;
+        LL_SPI_TransmitData8(instance, b);
+
+        while (!LL_SPI_IsActiveFlag_RXNE(instance));
+        b = LL_SPI_ReceiveData8(instance);
+        if (rxData) {
+            *(rxData++) = b;
+        }
+        --len;
+    }
+#endif
+
+    return true;
+}
+
+void spiInternalInitStream(const extDevice_t *dev, volatile busSegment_t *segment)
+{
+#if defined(STM32H5)
+    STATIC_DMA_DATA_AUTO uint8_t dummyTxByte = 0xff;
+    STATIC_DMA_DATA_AUTO uint8_t dummyRxByte;
+    busDevice_t *bus = dev->bus;
+    int len = segment->len;
+
+    uint8_t *txData = segment->u.buffers.txData;
+    LL_DMA_InitTypeDef *dmaInitTx = bus->dmaInitTx;
+
+    if (txData) {
+        dmaInitTx->SrcAddress = (uint32_t)txData;
+        dmaInitTx->SrcIncMode = LL_DMA_SRC_INCREMENT;
+    } else {
+        dmaInitTx->SrcAddress = (uint32_t)&dummyTxByte;
+        dmaInitTx->SrcIncMode = LL_DMA_SRC_FIXED;
+    }
+    dmaInitTx->BlkDataLength = len;
+
+    uint8_t *rxData = segment->u.buffers.rxData;
+    LL_DMA_InitTypeDef *dmaInitRx = bus->dmaInitRx;
+
+    if (rxData) {
+        dmaInitRx->DestAddress = (uint32_t)rxData;
+        dmaInitRx->DestIncMode = LL_DMA_DEST_INCREMENT;
+    } else {
+        dmaInitRx->DestAddress = (uint32_t)&dummyRxByte;
+        dmaInitRx->DestIncMode = LL_DMA_DEST_FIXED;
+    }
+    dmaInitRx->BlkDataLength = len;
+#elif defined(STM32N6)
+    // TODO: GPDMA uses a completely different LL_DMA API; SPI DMA not yet supported
+    UNUSED(dev);
+    UNUSED(segment);
+#else
+    STATIC_DMA_DATA_AUTO uint8_t dummyTxByte = 0xff;
+    STATIC_DMA_DATA_AUTO uint8_t dummyRxByte;
+    busDevice_t *bus = dev->bus;
+    int len = segment->len;
+
+    uint8_t *txData = segment->u.buffers.txData;
+    LL_DMA_InitTypeDef *dmaInitTx = bus->dmaInitTx;
+
+#if defined(STM32H7)
+    if (IS_BDMA_DESCRIPTOR(bus->dmaTx)) {
+        // BDMA path: transfers go through the bounce buffers, which need no cache ops as the
+        // MPU keeps .BDMA_RAM out of the D cache. TX data is copied in by spiInternalStartDMA()
+        // rather than here, as this may run for the next segment while the current one is still
+        // reading the buffer.
+        static BDMA_RAM uint8_t bdmaDummyTxByte;
+        static BDMA_RAM uint8_t bdmaDummyRxByte;
+
+        if (txData) {
+            dmaInitTx->MemoryOrM2MDstAddress = (uint32_t)bdmaTxBuffer;
+            dmaInitTx->MemoryOrM2MDstIncMode = LL_BDMA_MEMORY_INCREMENT;
+        } else {
+            bdmaDummyTxByte = 0xff;
+            dmaInitTx->MemoryOrM2MDstAddress = (uint32_t)&bdmaDummyTxByte;
+            dmaInitTx->MemoryOrM2MDstIncMode = LL_BDMA_MEMORY_NOINCREMENT;
+        }
+        dmaInitTx->NbData = len;
+
+        uint8_t *rxData = segment->u.buffers.rxData;
+        LL_DMA_InitTypeDef *dmaInitRx = bus->dmaInitRx;
+
+        if (rxData) {
+            dmaInitRx->MemoryOrM2MDstAddress = (uint32_t)bdmaRxBuffer;
+            dmaInitRx->MemoryOrM2MDstIncMode = LL_BDMA_MEMORY_INCREMENT;
+        } else {
+            dmaInitRx->MemoryOrM2MDstAddress = (uint32_t)&bdmaDummyRxByte;
+            dmaInitRx->MemoryOrM2MDstIncMode = LL_BDMA_MEMORY_NOINCREMENT;
+        }
+        dmaInitRx->NbData = len;
+        return;
+    }
+#endif
+
+    if (txData) {
+#ifdef __DCACHE_PRESENT
+#ifdef STM32H7
+        if (!isDmaramUncached(txData, len)) {
+#else
+        // No need to flush DTCM memory
+        if (!IS_DTCM(txData)) {
+#endif
+            // Flush the D cache to ensure the data to be written is in main memory
+            SCB_CleanDCache_by_Addr(
+                    (uint32_t *)((uint32_t)txData & ~CACHE_LINE_MASK),
+                    (((uint32_t)txData & CACHE_LINE_MASK) + len - 1 + CACHE_LINE_SIZE) & ~CACHE_LINE_MASK);
+        }
+#endif // __DCACHE_PRESENT
+        dmaInitTx->MemoryOrM2MDstAddress = (uint32_t)txData;
+        dmaInitTx->MemoryOrM2MDstIncMode = LL_DMA_MEMORY_INCREMENT;
+    } else {
+        dmaInitTx->MemoryOrM2MDstAddress = (uint32_t)&dummyTxByte;
+        dmaInitTx->MemoryOrM2MDstIncMode = LL_DMA_MEMORY_NOINCREMENT;
+    }
+    dmaInitTx->NbData = len;
+
+#if !defined(STM32G4) && !defined(STM32H7)
+    if (dev->bus->dmaRx) {
+#endif
+        uint8_t *rxData = segment->u.buffers.rxData;
+        LL_DMA_InitTypeDef *dmaInitRx = bus->dmaInitRx;
+
+        if (rxData) {
+            /* Flush the D cache for the start and end of the receive buffer as
+             * the cache will be invalidated after the transfer and any valid data
+             * just before/after must be in memory at that point
+             */
+#ifdef __DCACHE_PRESENT
+            // No need to flush/invalidate DTCM memory
+#ifdef STM32H7
+            if (!isDmaramUncached(rxData, len)) {
+#else
+            // No need to flush DTCM memory
+            if (!IS_DTCM(rxData)) {
+#endif
+                SCB_CleanInvalidateDCache_by_Addr(
+                        (uint32_t *)((uint32_t)rxData & ~CACHE_LINE_MASK),
+                        (((uint32_t)rxData & CACHE_LINE_MASK) + len - 1 + CACHE_LINE_SIZE) & ~CACHE_LINE_MASK);
+            }
+#endif // __DCACHE_PRESENT
+        dmaInitRx->MemoryOrM2MDstAddress = (uint32_t)rxData;
+        dmaInitRx->MemoryOrM2MDstIncMode = LL_DMA_MEMORY_INCREMENT;
+    } else {
+        dmaInitRx->MemoryOrM2MDstAddress = (uint32_t)&dummyRxByte;
+        dmaInitRx->MemoryOrM2MDstIncMode = LL_DMA_MEMORY_NOINCREMENT;
+    }
+    dmaInitRx->NbData = len;
+#if !defined(STM32G4) && !defined(STM32H7)
+    }
+#endif
+#endif // !STM32N6
+}
+
+void spiInternalStartDMA(const extDevice_t *dev)
+{
+#if defined(STM32H5)
+    busDevice_t *bus = dev->bus;
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+
+    dmaChannelDescriptor_t *dmaTx = bus->dmaTx;
+    dmaChannelDescriptor_t *dmaRx = bus->dmaRx;
+
+    // Use the correct callback argument
+    dmaRx->userParam = (uint32_t)dev;
+    dmaTx->userParam = (uint32_t)dev;
+
+    // Clear transfer flags
+    DMA_CLEAR_FLAG(dmaTx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+    DMA_CLEAR_FLAG(dmaRx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+    // Disable channels to enable update
+    LL_DMA_DisableChannel(dmaTx->dma, dmaTx->stream);
+    LL_DMA_DisableChannel(dmaRx->dma, dmaRx->stream);
+
+    // Use the Rx interrupt as this occurs once the SPI operation is complete
+    LL_DMA_EnableIT_TC(dmaRx->dma, dmaRx->stream);
+    LL_DMA_EnableIT_DTE(dmaRx->dma, dmaRx->stream);
+    LL_DMA_EnableIT_DTE(dmaTx->dma, dmaTx->stream);
+
+    // Update channels
+    LL_DMA_Init(dmaTx->dma, dmaTx->stream, bus->dmaInitTx);
+    LL_DMA_Init(dmaRx->dma, dmaRx->stream, bus->dmaInitRx);
+
+    // Setup SPI transfer size, enable DMA channels, then SPI
+    LL_SPI_SetTransferSize(instance, dev->bus->curSegment->len);
+    LL_DMA_EnableChannel(dmaTx->dma, dmaTx->stream);
+    LL_DMA_EnableChannel(dmaRx->dma, dmaRx->stream);
+    SET_BIT(instance->CFG1, SPI_CFG1_RXDMAEN | SPI_CFG1_TXDMAEN);
+    LL_SPI_Enable(instance);
+    LL_SPI_StartMasterTransfer(instance);
+#elif defined(STM32N6)
+    // TODO: GPDMA uses a completely different API; SPI DMA not yet supported
+    UNUSED(dev);
+#else
+    busDevice_t *bus = dev->bus;
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+
+    dmaChannelDescriptor_t *dmaTx = bus->dmaTx;
+    dmaChannelDescriptor_t *dmaRx = bus->dmaRx;
+
+#if defined(STM32H7)
+    if (IS_BDMA_DESCRIPTOR(bus->dmaTx)) {
+        // BDMA channel-based DMA for D3 domain peripherals (e.g., SPI6)
+        dmaRx->userParam = (uint32_t)dev;
+        dmaTx->userParam = (uint32_t)dev;
+
+        // Stage the TX data. The previous segment has completed, so the buffer is free.
+        const uint8_t *txData = bus->curSegment->u.buffers.txData;
+        if (txData) {
+            memcpy(bdmaTxBuffer, txData, bus->curSegment->len);
+            // Ensure the data has reached SRAM4 before BDMA is enabled
+            __DSB();
+        }
+
+        DMA_CLEAR_FLAG(dmaTx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+        DMA_CLEAR_FLAG(dmaRx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+        BDMA_Channel_TypeDef *channelRegsTx = (BDMA_Channel_TypeDef *)dmaTx->ref;
+        BDMA_Channel_TypeDef *channelRegsRx = (BDMA_Channel_TypeDef *)dmaRx->ref;
+
+        // Disable channels to enable update
+        channelRegsTx->CCR = 0U;
+        channelRegsRx->CCR = 0U;
+
+        // Use the Rx interrupt as this occurs once the SPI operation is complete. A transfer
+        // error disables the channel without a completion, so it must interrupt on both.
+        LL_EX_BDMA_EnableIT_TC(channelRegsRx);
+        LL_EX_BDMA_EnableIT_TE(channelRegsRx);
+        LL_EX_BDMA_EnableIT_TE(channelRegsTx);
+
+        // Update channels
+        LL_BDMA_Init(dmaTx->dma, dmaTx->stream, (LL_BDMA_InitTypeDef *)bus->dmaInitTx);
+        LL_BDMA_Init(dmaRx->dma, dmaRx->stream, (LL_BDMA_InitTypeDef *)bus->dmaInitRx);
+
+        // Enable SPI DMA
+        LL_SPI_SetTransferSize(instance, dev->bus->curSegment->len);
+        LL_BDMA_EnableChannel(dmaTx->dma, dmaTx->stream);
+        LL_BDMA_EnableChannel(dmaRx->dma, dmaRx->stream);
+        SET_BIT(instance->CFG1, SPI_CFG1_RXDMAEN | SPI_CFG1_TXDMAEN);
+        LL_SPI_Enable(instance);
+        LL_SPI_StartMasterTransfer(instance);
+        return;
+    }
+#endif
+
+#if !defined(STM32G4) && !defined(STM32H7)
+    if (dmaRx) {
+#endif
+        // Use the correct callback argument
+        dmaRx->userParam = (uint32_t)dev;
+        dmaTx->userParam = (uint32_t)dev;
+
+        // Clear transfer flags
+        DMA_CLEAR_FLAG(dmaTx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+        DMA_CLEAR_FLAG(dmaRx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+#ifdef STM32G4
+        // Disable channels to enable update
+        LL_DMA_DisableChannel(dmaTx->dma, dmaTx->stream);
+        LL_DMA_DisableChannel(dmaRx->dma, dmaRx->stream);
+
+        /* Use the Rx interrupt as this occurs once the SPI operation is complete whereas the Tx interrupt
+         * occurs earlier when the Tx FIFO is empty, but the SPI operation is still in progress
+         */
+        LL_DMA_EnableIT_TC(dmaRx->dma, dmaRx->stream);
+        LL_DMA_EnableIT_TE(dmaRx->dma, dmaRx->stream);
+        LL_DMA_EnableIT_TE(dmaTx->dma, dmaTx->stream);
+
+        // Update channels
+        LL_DMA_Init(dmaTx->dma, dmaTx->stream, bus->dmaInitTx);
+        LL_DMA_Init(dmaRx->dma, dmaRx->stream, bus->dmaInitRx);
+
+        // Enable channels
+        LL_DMA_EnableChannel(dmaTx->dma, dmaTx->stream);
+        LL_DMA_EnableChannel(dmaRx->dma, dmaRx->stream);
+
+        SET_BIT(instance->CR2, SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN);
+#else
+        DMA_Stream_TypeDef *streamRegsTx = (DMA_Stream_TypeDef *)dmaTx->ref;
+        DMA_Stream_TypeDef *streamRegsRx = (DMA_Stream_TypeDef *)dmaRx->ref;
+
+        // Disable streams to enable update
+        LL_DMA_WriteReg(streamRegsTx, CR, 0U);
+        LL_DMA_WriteReg(streamRegsRx, CR, 0U);
+
+        /* Use the Rx interrupt as this occurs once the SPI operation is complete whereas the Tx interrupt
+         * occurs earlier when the Tx FIFO is empty, but the SPI operation is still in progress
+         */
+        LL_EX_DMA_EnableIT_TC(streamRegsRx);
+        LL_EX_DMA_EnableIT_TE(streamRegsRx);
+        LL_EX_DMA_EnableIT_TE(streamRegsTx);
+
+        // Update streams
+        LL_DMA_Init(dmaTx->dma, dmaTx->stream, bus->dmaInitTx);
+        LL_DMA_Init(dmaRx->dma, dmaRx->stream, bus->dmaInitRx);
+
+        /* Note from AN4031
+         *
+         * If the user enables the used peripheral before the corresponding DMA stream, a FEIF
+         * (FIFO Error Interrupt Flag) may be set due to the fact the DMA is not ready to provide
+         * the first required data to the peripheral (in case of memory-to-peripheral transfer).
+         */
+
+        // Enable the SPI DMA Tx & Rx requests
+#if defined(STM32H7)
+        LL_SPI_SetTransferSize(instance, dev->bus->curSegment->len);
+        LL_DMA_EnableStream(dmaTx->dma, dmaTx->stream);
+        LL_DMA_EnableStream(dmaRx->dma, dmaRx->stream);
+        SET_BIT(instance->CFG1, SPI_CFG1_RXDMAEN | SPI_CFG1_TXDMAEN);
+        LL_SPI_Enable(instance);
+        LL_SPI_StartMasterTransfer(instance);
+#else
+        // Enable streams
+        LL_DMA_EnableStream(dmaTx->dma, dmaTx->stream);
+        LL_DMA_EnableStream(dmaRx->dma, dmaRx->stream);
+
+        SET_BIT(instance->CR2, SPI_CR2_TXDMAEN | SPI_CR2_RXDMAEN);
+#endif
+#if !defined(STM32G4) && !defined(STM32H7)
+    } else {
+        DMA_Stream_TypeDef *streamRegsTx = (DMA_Stream_TypeDef *)dmaTx->ref;
+
+        // Use the correct callback argument
+        dmaTx->userParam = (uint32_t)dev;
+
+        // Clear transfer flags
+        DMA_CLEAR_FLAG(dmaTx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+        // Disable streams to enable update
+        LL_DMA_WriteReg(streamRegsTx, CR, 0U);
+
+        LL_EX_DMA_EnableIT_TC(streamRegsTx);
+        LL_EX_DMA_EnableIT_TE(streamRegsTx);
+
+        // Update streams
+        LL_DMA_Init(dmaTx->dma, dmaTx->stream, bus->dmaInitTx);
+
+        /* Note from AN4031
+         *
+         * If the user enables the used peripheral before the corresponding DMA stream, a FEIF
+         * (FIFO Error Interrupt Flag) may be set due to the fact the DMA is not ready to provide
+         * the first required data to the peripheral (in case of memory-to-peripheral transfer).
+         */
+
+        // Enable the SPI DMA Tx request
+        // Enable streams
+        LL_DMA_EnableStream(dmaTx->dma, dmaTx->stream);
+
+        SET_BIT(instance->CR2, SPI_CR2_TXDMAEN);
+    }
+#endif
+#endif
+#endif // !STM32N6
+}
+
+void spiInternalStopDMA (const extDevice_t *dev)
+{
+#if defined(STM32H5)
+    busDevice_t *bus = dev->bus;
+
+    dmaChannelDescriptor_t *dmaTx = bus->dmaTx;
+    dmaChannelDescriptor_t *dmaRx = bus->dmaRx;
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+
+    // Disable the DMA channels
+    LL_DMA_DisableChannel(dmaTx->dma, dmaTx->stream);
+    LL_DMA_DisableChannel(dmaRx->dma, dmaRx->stream);
+
+    // Clear transfer flags
+    DMA_CLEAR_FLAG(dmaRx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+    LL_SPI_DisableDMAReq_TX(instance);
+    LL_SPI_DisableDMAReq_RX(instance);
+    LL_SPI_ClearFlag_TXTF(instance);
+    LL_SPI_Disable(instance);
+#elif defined(STM32N6)
+    // TODO: GPDMA uses a completely different API; SPI DMA not yet supported
+    UNUSED(dev);
+#else
+    busDevice_t *bus = dev->bus;
+
+    dmaChannelDescriptor_t *dmaTx = bus->dmaTx;
+    dmaChannelDescriptor_t *dmaRx = bus->dmaRx;
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+
+#if defined(STM32H7)
+    if (IS_BDMA_DESCRIPTOR(bus->dmaTx)) {
+        // BDMA channel-based stop for D3 domain peripherals
+        LL_BDMA_DisableChannel(dmaRx->dma, dmaRx->stream);
+        LL_BDMA_DisableChannel(dmaTx->dma, dmaTx->stream);
+
+        DMA_CLEAR_FLAG(dmaRx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+        LL_SPI_DisableDMAReq_TX(instance);
+        LL_SPI_DisableDMAReq_RX(instance);
+        LL_SPI_ClearFlag_TXTF(instance);
+        LL_SPI_Disable(instance);
+
+        // Hand the received data back before the segment callback runs. Through the cache,
+        // so spiRxIrqHandler() must not invalidate the destination afterwards.
+        uint8_t *rxData = bus->curSegment->u.buffers.rxData;
+        if (rxData) {
+            memcpy(rxData, bdmaRxBuffer, bus->curSegment->len);
+        }
+        return;
+    }
+#endif
+
+#if !defined(STM32G4) && !defined(STM32H7)
+    if (dmaRx) {
+#endif
+        // Disable the DMA engine and SPI interface
+#ifdef STM32G4
+        LL_DMA_DisableChannel(dmaTx->dma, dmaTx->stream);
+        LL_DMA_DisableChannel(dmaRx->dma, dmaRx->stream);
+#else
+        LL_DMA_DisableStream(dmaRx->dma, dmaRx->stream);
+        LL_DMA_DisableStream(dmaTx->dma, dmaTx->stream);
+#endif
+
+        // Clear transfer flags
+        DMA_CLEAR_FLAG(dmaRx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+        LL_SPI_DisableDMAReq_TX(instance);
+        LL_SPI_DisableDMAReq_RX(instance);
+#if defined(STM32H7)
+        LL_SPI_ClearFlag_TXTF(instance);
+        LL_SPI_Disable(instance);
+#endif
+#if !defined(STM32G4) && !defined(STM32H7)
+    } else {
+
+        // Ensure the current transmission is complete
+        while (LL_SPI_IsActiveFlag_BSY(instance));
+
+        // Drain the RX buffer
+        while (LL_SPI_IsActiveFlag_RXNE(instance)) {
+            instance->DR;
+        }
+
+        // Disable the DMA engine and SPI interface
+        LL_DMA_DisableStream(dmaTx->dma, dmaTx->stream);
+
+        DMA_CLEAR_FLAG(dmaTx, DMA_IT_HTIF | DMA_IT_TEIF | DMA_IT_TCIF);
+
+        LL_SPI_DisableDMAReq_TX(instance);
+#endif
+#if !defined(STM32G4) && !defined(STM32H7)
+    }
+#endif
+#endif // !STM32N6
+}
+
+void spiInternalAbortDMA(const extDevice_t *dev)
+{
+    SPI_TypeDef *instance = (SPI_TypeDef *)dev->bus->busType_u.spi.instance;
+
+    spiInternalStopDMA(dev);
+
+#if defined(STM32H7) || defined(STM32H5)
+    LL_SPI_ClearFlag_EOT(instance);
+    LL_SPI_ClearFlag_OVR(instance);
+    LL_SPI_ClearFlag_UDR(instance);
+    LL_SPI_ClearFlag_MODF(instance);
+#elif defined(STM32N6)
+    UNUSED(instance);
+#else
+    while (LL_SPI_IsActiveFlag_BSY(instance));
+
+    while (LL_SPI_IsActiveFlag_RXNE(instance)) {
+        LL_SPI_ReceiveData8(instance);
+    }
+
+    // An overrun discards everything received after it until cleared
+    LL_SPI_ClearFlag_OVR(instance);
+#endif
+}
+
+// DMA transfer setup and start
+FAST_CODE void spiSequenceStart(const extDevice_t *dev)
+{
+    busDevice_t *bus = dev->bus;
+    SPI_TypeDef *instance = (SPI_TypeDef *)bus->busType_u.spi.instance;
+    spiDevice_t *spi = &spiDevice[spiDeviceByInstance(bus->busType_u.spi.instance)];
+    bool dmaSafe = dev->useDMA;
+    uint32_t xferLen = 0;
+    uint32_t segmentCount = 0;
+
+    bus->initSegment = true;
+
+    // Switch bus speed
+#if !defined(STM32H7) && !defined(STM32H5) && !defined(STM32N6)
+    LL_SPI_Disable(instance);
+#endif
+
+    if (dev->busType_u.spi.speed != bus->busType_u.spi.speed) {
+        LL_SPI_SetBaudRatePrescaler(instance, spiDivisorToBRbits(instance, dev->busType_u.spi.speed));
+        bus->busType_u.spi.speed = dev->busType_u.spi.speed;
+    }
+
+    // Switch SPI clock polarity/phase if necessary
+    if (dev->busType_u.spi.leadingEdge != bus->busType_u.spi.leadingEdge) {
+        if (dev->busType_u.spi.leadingEdge) {
+            IOConfigGPIOAF(IOGetByTag(spi->sck), SPI_IO_AF_SCK_CFG_LOW, spi->sckAF);
+            LL_SPI_SetClockPhase(instance, LL_SPI_PHASE_1EDGE);
+            LL_SPI_SetClockPolarity(instance, LL_SPI_POLARITY_LOW);
+        }
+        else {
+            IOConfigGPIOAF(IOGetByTag(spi->sck), SPI_IO_AF_SCK_CFG_HIGH, spi->sckAF);
+            LL_SPI_SetClockPhase(instance, LL_SPI_PHASE_2EDGE);
+            LL_SPI_SetClockPolarity(instance, LL_SPI_POLARITY_HIGH);
+        }
+
+        bus->busType_u.spi.leadingEdge = dev->busType_u.spi.leadingEdge;
+    }
+
+#if !defined(STM32H7) && !defined(STM32H5) && !defined(STM32N6)
+    LL_SPI_Enable(instance);
+#endif
+
+    /* Where data is being read into a buffer which is cached, where the start or end of that
+     * buffer is not cache aligned, there is a risk of corruption of other data in that cache line.
+     * After the read is complete, the cache lines covering the structure will be invalidated to ensure
+     * that the processor sees the read data, not what was in cache previously. Unfortunately if
+     * there is any other data in the area covered by those cache lines, at the start or end of the
+     * buffer, it too will be invalidated, so had the processor written to those locations during the DMA
+     * operation those written values will be lost.
+     */
+
+    // Check that any reads are cache aligned and of multiple cache lines in length
+    for (busSegment_t *checkSegment = (busSegment_t *)bus->curSegment; checkSegment->len; checkSegment++) {
+        // Check there is no receive data as only transmit DMA is available
+        if ((checkSegment->u.buffers.rxData) && (bus->dmaRx == (dmaChannelDescriptor_t *)NULL)) {
+            dmaSafe = false;
+            break;
+        }
+#ifdef STM32H7
+        if (bus->dmaTx && IS_BDMA_DESCRIPTOR(bus->dmaTx)) {
+            // Any buffer will do as BDMA transfers are staged through the bounce buffers,
+            // provided the segment fits in them
+            if ((checkSegment->u.buffers.rxData || checkSegment->u.buffers.txData) &&
+                (checkSegment->len > SPI_BDMA_BUFFER_SIZE)) {
+                dmaSafe = false;
+                break;
+            }
+        } else {
+            // Check if RX data can be DMAed
+            if ((checkSegment->u.buffers.rxData) &&
+                // DTCM can't be accessed by DMA1/2 on the H7
+                (IS_DTCM(checkSegment->u.buffers.rxData) ||
+                 // Memory declared as DMA_RAM will have an address between &_dmaram_start__ and &_dmaram_end__
+                 (((checkSegment->u.buffers.rxData < &_dmaram_start__) || (checkSegment->u.buffers.rxData >= &_dmaram_end__)) &&
+                 (((uint32_t)checkSegment->u.buffers.rxData & (CACHE_LINE_SIZE - 1)) || (checkSegment->len & (CACHE_LINE_SIZE - 1)))))) {
+                dmaSafe = false;
+                break;
+            }
+            // Check if TX data can be DMAed
+            else if ((checkSegment->u.buffers.txData) && IS_DTCM(checkSegment->u.buffers.txData)) {
+                dmaSafe = false;
+                break;
+            }
+        }
+#elif defined(STM32F7)
+        if ((checkSegment->u.buffers.rxData) &&
+            // DTCM is accessible and uncached on the F7
+            (!IS_DTCM(checkSegment->u.buffers.rxData) &&
+            (((uint32_t)checkSegment->u.buffers.rxData & (CACHE_LINE_SIZE - 1)) || (checkSegment->len & (CACHE_LINE_SIZE - 1))))) {
+            dmaSafe = false;
+            break;
+        }
+#elif defined(STM32G4)
+        // Check if RX data can be DMAed
+        if ((checkSegment->u.buffers.rxData) &&
+            // CCM can't be accessed by DMA1/2 on the G4
+            IS_CCM(checkSegment->u.buffers.rxData)) {
+            dmaSafe = false;
+            break;
+        }
+        if ((checkSegment->u.buffers.txData) &&
+            // CCM can't be accessed by DMA1/2 on the G4
+            IS_CCM(checkSegment->u.buffers.txData)) {
+            dmaSafe = false;
+            break;
+        }
+#endif
+        // Note that these counts are only valid if dmaSafe is true
+        segmentCount++;
+        xferLen += checkSegment->len;
+    }
+
+    // Use DMA if possible
+    // If there are more than one segments, or a single segment with negateCS negated in the list terminator then force DMA irrespective of length
+    if (bus->useDMA && dmaSafe && ((segmentCount > 1) ||
+                                   (xferLen >= SPI_DMA_THRESHOLD) ||
+                                   !bus->curSegment[segmentCount].negateCS)) {
+        spiProcessSegmentsDMA(dev);
+    } else {
+        spiProcessSegmentsPolled(dev);
+    }
+}
+#endif

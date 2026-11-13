@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -20,20 +23,134 @@
 
 #include "platform.h"
 
-#include "fc/fc_init.h"
+#include "drivers/light_led.h"
+#include "drivers/time.h"
+
+#ifdef USE_VCP
+#include "drivers/serial_usb_vcp.h"
+#endif
+
+#include "drivers/system.h"
+
+#if ENABLE_LCD_CONSOLE && ENABLE_LCD_PRINTF_REDIRECT
+#include "common/printf_serial.h"
+#include "drivers/serial_lcd_console.h"
+#endif
+
+#include "fc/init.h"
+
+// USE_MULTICORE turns on the multicore API and its features (core 1 + dispatch).
+// ENABLE_MULTICORE_INIT is the optional core-allocation policy (RP2350) of
+// running the FC init phases on the second core; it requires USE_MULTICORE.
+#if defined(ENABLE_MULTICORE_INIT) && !defined(USE_MULTICORE)
+#error "ENABLE_MULTICORE_INIT requires USE_MULTICORE"
+#endif
+
+#ifdef USE_MULTICORE
+#include "platform/multicore.h"
+#endif
+
+#ifdef USE_USB_MSC
+#include "drivers/usb_msc.h"
+#endif
 
 #include "scheduler/scheduler.h"
 
+#ifdef CONFIG_IN_FILE
+#include "cli/cli.h"
+#endif
 
-int main(void)
+void run(void);
+
+int main(int argc, char * argv[])
 {
-    init();
+#ifdef USE_MAIN_ARGS
+    targetParseArgs(argc, argv);
+#else
+    UNUSED(argc);
+    UNUSED(argv);
+#endif
+
+#if SERIAL_PORT_COUNT > 0
+    printfSerialInit();
+#endif
+
+    // Do basic system initialisation including multicore support if applicable
+    systemInit();
+
+#ifdef ENABLE_MULTICORE_INIT
+    // Perform early initialisation prior to USB
+    multicoreExecuteBlocking(initPhase1);
+
+    // Now perform the core initialisation
+    multicoreExecuteBlocking(initPhase2);
+#else
+    initPhase1();
+    initPhase2();
+#endif
+
+#ifdef USE_USB_MSC
+    mscButtonInit();
+    if (checkMsc()) {
+        // MSC mode TODO: boot using single core
+        initMsc();
+        // Never returns (but just in case...)
+        return 0;
+    }
+#endif
+
+#ifdef USE_VCP
+    // initialise the USB CDC interface using core 0 all USB code, including
+    // interrupts, must run on core 0
+    usbVcpInit();
+#endif
+
+#ifdef ENABLE_MULTICORE_INIT
+    // Now perform the final initialisation
+    multicoreExecuteBlocking(initPhase3);
+#else
+    initPhase3();
+#endif
+
+#if ENABLE_LCD_CONSOLE && ENABLE_LCD_PRINTF_REDIRECT
+    // Open the LCD console after every other peripheral init has
+    // finished and after USB VCP comes up. Earlier peripheral inits can
+    // touch GPIO MODER for pins on the same ports as the LTDC signals,
+    // so running LCD setup last keeps the AF mode bits intact; opening
+    // the panel last also means a wedge in panel bring-up doesn't take
+    // VCP down with it (feedback_n6_lcd_wedge.md).
+    {
+        struct serialPort_s *lcdPort = lcdConsoleSerialOpen();
+        if (lcdPort) {
+            setPrintfSerialPort(lcdPort);
+        }
+    }
+#endif
+
+#ifdef CONFIG_IN_FILE
+    {
+        const char *configFile = targetGetConfigFile();
+        if (configFile) {
+            cliProcessConfigFile(configFile);
+            // cliProcessConfigFile handles exit internally
+            return 0;
+        }
+    }
+#endif
+
+    // Launch the scheduler
+    run();
+
+    return 0;
+}
+
+void FAST_CODE run(void)
+{
     while (true) {
         scheduler();
-        processLoopback();
-#ifdef SIMULATOR_BUILD
-        delayMicroseconds_real(50); // max rate 20kHz
+
+#if defined(RUN_LOOP_DELAY_US) && RUN_LOOP_DELAY_US > 0
+        delayMicroseconds_real(RUN_LOOP_DELAY_US);
 #endif
     }
-    return 0;
 }

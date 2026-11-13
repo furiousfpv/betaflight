@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -23,25 +26,29 @@
 
 #include "build/build_config.h"
 
-#include "common/maths.h"
+#include "common/crc.h"
+#include "common/utils.h"
 
 #include "config/config_eeprom.h"
+#include "config/config_eeprom_impl.h"
 #include "config/config_streamer.h"
-#include "config/parameter_group.h"
+#include "config/config_streamer_impl.h"
 
+#include "pg/pg.h"
+#include "config/config.h"
+
+#ifdef CONFIG_IN_SDCARD
+#include "io/asyncfatfs/asyncfatfs.h"
+#endif
+
+#include "drivers/flash/flash.h"
 #include "drivers/system.h"
-
-extern uint8_t __config_start;   // configured via linker script when building binaries.
-extern uint8_t __config_end;
 
 static uint16_t eepromConfigSize;
 
 typedef enum {
     CR_CLASSICATION_SYSTEM   = 0,
-    CR_CLASSICATION_PROFILE1 = 1,
-    CR_CLASSICATION_PROFILE2 = 2,
-    CR_CLASSICATION_PROFILE3 = 3,
-    CR_CLASSICATION_PROFILE_LAST = CR_CLASSICATION_PROFILE3,
+    CR_CLASSICATION_PROFILE_LAST = CR_CLASSICATION_SYSTEM,
 } configRecordFlags_e;
 
 #define CR_CLASSIFICATION_MASK  (0x3)
@@ -52,7 +59,6 @@ typedef enum {
 typedef struct {
     uint8_t eepromConfigVersion;
     uint8_t magic_be;           // magic number, should be 0xBE
-    char boardIdentifier[sizeof(TARGET_BOARD_IDENTIFIER)];
 } PG_PACKED configHeader_t;
 
 // Header for each stored PG.
@@ -80,31 +86,262 @@ typedef struct {
     uint32_t word;
 } PG_PACKED packingTest_t;
 
+#if defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH)
+static MMFLASH_CODE bool loadEEPROMFromExternalFlash(void)
+{
+    const flashPartition_t *flashPartition = flashPartitionFindByType(FLASH_PARTITION_TYPE_CONFIG);
+    const flashGeometry_t *flashGeometry = flashGetGeometry();
+
+    uint32_t flashStartAddress = flashPartition->startSector * flashGeometry->sectorSize;
+
+    uint32_t totalBytesRead = 0;
+    int bytesRead = 0;
+
+    bool success = false;
+#ifdef CONFIG_IN_MEMORY_MAPPED_FLASH
+    flashMemoryMappedModeDisable();
+#endif
+    do {
+        bytesRead = flashReadBytes(flashStartAddress + totalBytesRead, &eepromData[totalBytesRead], EEPROM_SIZE - totalBytesRead);
+        if (bytesRead > 0) {
+            totalBytesRead += bytesRead;
+            success = (totalBytesRead == EEPROM_SIZE);
+        }
+    } while (!success && bytesRead > 0);
+#ifdef CONFIG_IN_MEMORY_MAPPED_FLASH
+    flashMemoryMappedModeEnable();
+#endif
+
+    return success;
+}
+
+#ifdef CONFIG_IN_MEMORY_MAPPED_FLASH
+MMFLASH_CODE_NOINLINE void saveEEPROMToMemoryMappedFlash(void)
+{
+    const flashPartition_t *flashPartition = flashPartitionFindByType(FLASH_PARTITION_TYPE_CONFIG);
+    const flashGeometry_t *flashGeometry = flashGetGeometry();
+
+    uint32_t flashSectorSize = flashGeometry->sectorSize;
+    uint32_t flashPageSize = flashGeometry->pageSize;
+
+    uint32_t flashStartAddress = flashPartition->startSector * flashGeometry->sectorSize;
+
+    uint32_t bytesRemaining = EEPROM_SIZE;
+    uint32_t offset = 0;
+
+    flashMemoryMappedModeDisable();
+
+    do {
+        uint32_t flashAddress = flashStartAddress + offset;
+
+        uint32_t bytesToWrite = bytesRemaining;
+        if (bytesToWrite > flashPageSize) {
+            bytesToWrite = flashPageSize;
+        }
+
+        bool onSectorBoundary = flashAddress % flashSectorSize == 0;
+        if (onSectorBoundary) {
+            flashEraseSector(flashAddress);
+        }
+
+        flashPageProgram(flashAddress, (uint8_t *)&eepromData[offset], bytesToWrite, NULL);
+
+        bytesRemaining -= bytesToWrite;
+        offset += bytesToWrite;
+    } while (bytesRemaining > 0);
+
+    flashWaitForReady();
+
+    flashMemoryMappedModeEnable();
+}
+#endif
+
+#elif defined(CONFIG_IN_SDCARD)
+
+enum {
+    FILE_STATE_NONE = 0,
+    FILE_STATE_BUSY = 1,
+    FILE_STATE_FAILED,
+    FILE_STATE_COMPLETE,
+};
+
+uint8_t fileState = FILE_STATE_NONE;
+
+const char *defaultSDCardConfigFilename = "CONFIG.BIN";
+
+void saveEEPROMToSDCardCloseContinue(void)
+{
+    if (fileState != FILE_STATE_FAILED) {
+        fileState = FILE_STATE_COMPLETE;
+    }
+}
+
+void saveEEPROMToSDCardWriteContinue(afatfsFilePtr_t file)
+{
+    if (!file) {
+        fileState = FILE_STATE_FAILED;
+        return;
+    }
+
+    uint32_t totalBytesWritten = 0;
+    uint32_t bytesWritten = 0;
+    bool success;
+
+    do {
+        bytesWritten = afatfs_fwrite(file, &eepromData[totalBytesWritten], EEPROM_SIZE - totalBytesWritten);
+        totalBytesWritten += bytesWritten;
+        success = (totalBytesWritten == EEPROM_SIZE);
+
+        afatfs_poll();
+    } while (!success && afatfs_getLastError() == AFATFS_ERROR_NONE);
+
+    if (!success) {
+        fileState = FILE_STATE_FAILED;
+    }
+
+    while (!afatfs_fclose(file, saveEEPROMToSDCardCloseContinue)) {
+        afatfs_poll();
+    }
+}
+
+bool saveEEPROMToSDCard(void)
+{
+    fileState = FILE_STATE_BUSY;
+    bool result = afatfs_fopen(defaultSDCardConfigFilename, "w+", saveEEPROMToSDCardWriteContinue);
+    if (!result) {
+        return false;
+    }
+
+    while (fileState == FILE_STATE_BUSY) {
+        afatfs_poll();
+    }
+
+    while (!afatfs_flush()) {
+        afatfs_poll();
+    };
+
+    return (fileState == FILE_STATE_COMPLETE);
+}
+
+void loadEEPROMFromSDCardCloseContinue(void)
+{
+    if (fileState != FILE_STATE_FAILED) {
+        fileState = FILE_STATE_COMPLETE;
+    }
+}
+
+void loadEEPROMFromSDCardReadContinue(afatfsFilePtr_t file)
+{
+    if (!file) {
+        fileState = FILE_STATE_FAILED;
+        return;
+    }
+
+    fileState = FILE_STATE_BUSY;
+
+    uint32_t totalBytesRead = 0;
+    uint32_t bytesRead = 0;
+    bool success;
+
+    if (afatfs_feof(file)) {
+        // empty file, nothing to load.
+        memset(eepromData, 0x00, EEPROM_SIZE);
+        success = true;
+    } else {
+
+        do {
+            bytesRead = afatfs_fread(file, &eepromData[totalBytesRead], EEPROM_SIZE - totalBytesRead);
+            totalBytesRead += bytesRead;
+            success = (totalBytesRead == EEPROM_SIZE);
+
+            afatfs_poll();
+        } while (!success && afatfs_getLastError() == AFATFS_ERROR_NONE);
+    }
+
+    if (!success) {
+        fileState = FILE_STATE_FAILED;
+    }
+
+    while (!afatfs_fclose(file, loadEEPROMFromSDCardCloseContinue)) {
+        afatfs_poll();
+    }
+
+    return;
+}
+
+bool loadEEPROMFromSDCard(void)
+{
+    fileState = FILE_STATE_BUSY;
+    // use "w+" mode here to ensure the file is created now - in w+ mode we can read and write and the seek position is 0 on existing files, ready for reading.
+    bool result = afatfs_fopen(defaultSDCardConfigFilename, "w+", loadEEPROMFromSDCardReadContinue);
+    if (!result) {
+        return false;
+    }
+
+    while (fileState == FILE_STATE_BUSY) {
+        afatfs_poll();
+    }
+
+    return (fileState == FILE_STATE_COMPLETE);
+}
+#endif
+
 void initEEPROM(void)
 {
     // Verify that this architecture packs as expected.
-    BUILD_BUG_ON(offsetof(packingTest_t, byte) != 0);
-    BUILD_BUG_ON(offsetof(packingTest_t, word) != 1);
-    BUILD_BUG_ON(sizeof(packingTest_t) != 5);
+    STATIC_ASSERT(offsetof(packingTest_t, byte) == 0, byte_packing_test_failed);
+    STATIC_ASSERT(offsetof(packingTest_t, word) == 1, word_packing_test_failed);
+    STATIC_ASSERT(sizeof(packingTest_t) == 5, overall_packing_test_failed);
 
-    BUILD_BUG_ON(sizeof(configHeader_t) != 2 + sizeof(TARGET_BOARD_IDENTIFIER));
-    BUILD_BUG_ON(sizeof(configFooter_t) != 2);
-    BUILD_BUG_ON(sizeof(configRecord_t) != 6);
+    STATIC_ASSERT(sizeof(configFooter_t) == 2, footer_size_failed);
+    STATIC_ASSERT(sizeof(configRecord_t) == 6, record_size_failed);
+
+#if defined(ENABLE_CONFIG_FLASH_INIT)
+    // Map the flash-resident config into the readable memory window before the
+    // memory-mapped reads below (ensureEEPROMStructureIsValid / readEEPROM).
+    configFlashInit();
+#endif
+
+#if defined(CONFIG_IN_FILE)
+    bool eepromLoaded = loadEEPROMFromFile();
+    if (!eepromLoaded) {
+        // File read failed - just die now
+        failureMode(FAILURE_FILE_READ_FAILED);
+    }
+#elif defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH)
+    bool eepromLoaded = loadEEPROMFromExternalFlash();
+    if (!eepromLoaded) {
+        // Flash read failed - just die now
+        failureMode(FAILURE_FLASH_READ_FAILED);
+    }
+#elif defined(CONFIG_IN_SDCARD)
+    bool eepromLoaded = loadEEPROMFromSDCard();
+    if (!eepromLoaded) {
+        // SDCard read failed - just die now
+        failureMode(FAILURE_SDCARD_READ_FAILED);
+    }
+#endif
 }
 
-// Scan the EEPROM config. Returns true if the config is valid.
-bool isEEPROMContentValid(void)
+bool isEEPROMVersionValid(void)
 {
-    const uint8_t *p = &__config_start;
+    const uint8_t *p = (const uint8_t*)&__config_start;
     const configHeader_t *header = (const configHeader_t *)p;
 
     if (header->eepromConfigVersion != EEPROM_CONF_VERSION) {
         return false;
     }
+
+    return true;
+}
+
+// Scan the EEPROM config. Returns true if the config is valid.
+bool isEEPROMStructureValid(void)
+{
+    const uint8_t *p = (const uint8_t*)&__config_start;
+    const configHeader_t *header = (const configHeader_t *)p;
+
     if (header->magic_be != 0xBE) {
-        return false;
-    }
-    if (strncasecmp(header->boardIdentifier, TARGET_BOARD_IDENTIFIER, sizeof(TARGET_BOARD_IDENTIFIER))) {
         return false;
     }
 
@@ -119,7 +356,7 @@ bool isEEPROMContentValid(void)
             // Found the end.  Stop scanning.
             break;
         }
-        if (p + record->size >= &__config_end
+        if (p + record->size >= (const uint8_t*)&__config_end
             || record->size < sizeof(*record)) {
             // Too big or too small.
             return false;
@@ -135,11 +372,11 @@ bool isEEPROMContentValid(void)
     p += sizeof(*footer);
 
     // include stored CRC in the CRC calculation
-    const uint16_t *storedCrc = (const uint16_t *)p;
-    crc = crc16_ccitt_update(crc, storedCrc, sizeof(*storedCrc));
-    p += sizeof(storedCrc);
+    // the CRC follows variable-size records, so it may sit at an odd address: treat it as bytes
+    crc = crc16_ccitt_update(crc, p, sizeof(uint16_t));
+    p += sizeof(uint16_t);
 
-    eepromConfigSize = p - &__config_start;
+    eepromConfigSize = p - (const uint8_t*)&__config_start;
 
     // CRC has the property that if the CRC itself is included in the calculation the resulting CRC will have constant value
     return crc == CRC_CHECK_VALUE;
@@ -150,17 +387,31 @@ uint16_t getEEPROMConfigSize(void)
     return eepromConfigSize;
 }
 
+size_t getEEPROMStorageSize(void)
+{
+#if defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH)
+
+    const flashPartition_t *flashPartition = flashPartitionFindByType(FLASH_PARTITION_TYPE_CONFIG);
+    return FLASH_PARTITION_SECTOR_COUNT(flashPartition) * flashGetGeometry()->sectorSize;
+#endif
+#ifdef CONFIG_IN_RAM
+    return EEPROM_SIZE;
+#else
+    return (const uint8_t*)&__config_end - (const uint8_t*)&__config_start;
+#endif
+}
+
 // find config record for reg + classification (profile info) in EEPROM
 // return NULL when record is not found
 // this function assumes that EEPROM content is valid
 static const configRecord_t *findEEPROM(const pgRegistry_t *reg, configRecordFlags_e classification)
 {
-    const uint8_t *p = &__config_start;
+    const uint8_t *p = (const uint8_t*)&__config_start;
     p += sizeof(configHeader_t);             // skip header
     while (true) {
         const configRecord_t *record = (const configRecord_t *)p;
         if (record->size == 0
-            || p + record->size >= &__config_end
+            || p + record->size >= (const uint8_t*)&__config_end
             || record->size < sizeof(*record))
             break;
         if (pgN(reg) == record->pgn
@@ -177,91 +428,124 @@ static const configRecord_t *findEEPROM(const pgRegistry_t *reg, configRecordFla
 //   but each PG is loaded/initialized exactly once and in defined order.
 bool loadEEPROM(void)
 {
+    bool success = true;
+
     PG_FOREACH(reg) {
-        configRecordFlags_e cls_start, cls_end;
-        if (pgIsSystem(reg)) {
-            cls_start = CR_CLASSICATION_SYSTEM;
-            cls_end = CR_CLASSICATION_SYSTEM;
-        } else {
-            cls_start = CR_CLASSICATION_PROFILE1;
-            cls_end = CR_CLASSICATION_PROFILE_LAST;
-        }
-        for (configRecordFlags_e cls = cls_start; cls <= cls_end; cls++) {
-            int profileIndex = cls - cls_start;
-            const configRecord_t *rec = findEEPROM(reg, cls);
-            if (rec) {
-                // config from EEPROM is available, use it to initialize PG. pgLoad will handle version mismatch
-                pgLoad(reg, profileIndex, rec->pg, rec->size - offsetof(configRecord_t, pg), rec->version);
-            } else {
-                pgReset(reg, profileIndex);
+        const configRecord_t *rec = findEEPROM(reg, CR_CLASSICATION_SYSTEM);
+        if (rec) {
+            // config from EEPROM is available, use it to initialize PG. pgLoad will handle version mismatch
+            if (!pgLoad(reg, rec->pg, rec->size - offsetof(configRecord_t, pg), rec->version)) {
+                success = false;
             }
+        } else {
+            pgReset(reg);
+
+            success = false;
+        }
+        *reg->fnv_hash = fnv_update(FNV_OFFSET_BASIS, reg->address, pgSize(reg));
+    }
+
+    return success;
+}
+
+configResetReason_e diagnoseEEPROM(uint16_t *detail)
+{
+    const configHeader_t *header = (const configHeader_t *)&__config_start;
+
+    *detail = 0;
+
+    if (header->magic_be != 0xBE) {
+        const bool erased = header->eepromConfigVersion == header->magic_be
+            && (header->magic_be == 0xFF || header->magic_be == 0x00);
+        return erased ? CONFIG_RESET_EMPTY : CONFIG_RESET_CORRUPT;
+    }
+
+    if (!isEEPROMStructureValid()) {
+        return CONFIG_RESET_CORRUPT;
+    }
+
+    if (header->eepromConfigVersion != EEPROM_CONF_VERSION) {
+        *detail = header->eepromConfigVersion;
+        return CONFIG_RESET_VERSION;
+    }
+
+    PG_FOREACH(reg) {
+        const configRecord_t *rec = findEEPROM(reg, CR_CLASSICATION_SYSTEM);
+        if (!rec) {
+            *detail = pgN(reg);
+            return CONFIG_RESET_PG_MISSING;
+        }
+        if (rec->version != pgVersion(reg)) {
+            *detail = pgN(reg);
+            return CONFIG_RESET_PG_VERSION;
+        }
+        if (reg->length > 1 && rec->size - offsetof(configRecord_t, pg) != pgSize(reg)) {
+            *detail = pgN(reg);
+            return CONFIG_RESET_PG_SIZE;
         }
     }
-    return true;
+
+    return CONFIG_RESET_NONE;
 }
 
 static bool writeSettingsToEEPROM(void)
 {
-    config_streamer_t streamer;
-    config_streamer_init(&streamer);
-
-    config_streamer_start(&streamer, (uintptr_t)&__config_start, &__config_end - &__config_start);
+    bool dirtyConfig = !isEEPROMVersionValid() || !isEEPROMStructureValid();
 
     configHeader_t header = {
         .eepromConfigVersion =  EEPROM_CONF_VERSION,
         .magic_be =             0xBE,
-        .boardIdentifier =      TARGET_BOARD_IDENTIFIER,
     };
 
-    config_streamer_write(&streamer, (uint8_t *)&header, sizeof(header));
-    uint16_t crc = CRC_START_VALUE;
-    crc = crc16_ccitt_update(crc, (uint8_t *)&header, sizeof(header));
     PG_FOREACH(reg) {
-        const uint16_t regSize = pgSize(reg);
-        configRecord_t record = {
-            .size = sizeof(configRecord_t) + regSize,
-            .pgn = pgN(reg),
-            .version = pgVersion(reg),
-            .flags = 0
-        };
+        if (*reg->fnv_hash != fnv_update(FNV_OFFSET_BASIS, reg->address, pgSize(reg))) {
+            dirtyConfig = true;
+        }
+    }
 
-        if (pgIsSystem(reg)) {
-            // write the only instance
+    // Only write the config if it has changed
+    if (dirtyConfig) {
+        config_streamer_t streamer;
+        config_streamer_init(&streamer);
+
+        config_streamer_start(&streamer, (uintptr_t)&__config_start, (const uint8_t*)&__config_end - (const uint8_t*)&__config_start);
+
+        config_streamer_write(&streamer, (uint8_t *)&header, sizeof(header));
+        uint16_t crc = CRC_START_VALUE;
+        crc = crc16_ccitt_update(crc, (uint8_t *)&header, sizeof(header));
+        PG_FOREACH(reg) {
+            const uint16_t regSize = pgSize(reg);
+            configRecord_t record = {
+                .size = sizeof(configRecord_t) + regSize,
+                .pgn = pgN(reg),
+                .version = pgVersion(reg),
+                .flags = 0,
+            };
+
             record.flags |= CR_CLASSICATION_SYSTEM;
             config_streamer_write(&streamer, (uint8_t *)&record, sizeof(record));
             crc = crc16_ccitt_update(crc, (uint8_t *)&record, sizeof(record));
             config_streamer_write(&streamer, reg->address, regSize);
             crc = crc16_ccitt_update(crc, reg->address, regSize);
-        } else {
-            // write one instance for each profile
-            for (uint8_t profileIndex = 0; profileIndex < PG_PROFILE_COUNT; profileIndex++) {
-                record.flags = 0;
-                record.flags |= ((profileIndex + 1) & CR_CLASSIFICATION_MASK);
-                config_streamer_write(&streamer, (uint8_t *)&record, sizeof(record));
-                crc = crc16_ccitt_update(crc, (uint8_t *)&record, sizeof(record));
-                const uint8_t *address = reg->address + (regSize * profileIndex);
-                config_streamer_write(&streamer, address, regSize);
-                crc = crc16_ccitt_update(crc, address, regSize);
-            }
         }
+
+        configFooter_t footer = {
+            .terminator = 0,
+        };
+
+        config_streamer_write(&streamer, (uint8_t *)&footer, sizeof(footer));
+        crc = crc16_ccitt_update(crc, (uint8_t *)&footer, sizeof(footer));
+
+        // include inverted CRC in big endian format in the CRC
+        const uint16_t invertedBigEndianCrc = ~(((crc & 0xFF) << 8) | (crc >> 8));
+        config_streamer_write(&streamer, (uint8_t *)&invertedBigEndianCrc, sizeof(crc));
+
+        config_streamer_flush(&streamer);
+
+        return (config_streamer_finish(&streamer) == 0);
+    } else {
+        return true;
     }
-
-    configFooter_t footer = {
-        .terminator = 0,
-    };
-
-    config_streamer_write(&streamer, (uint8_t *)&footer, sizeof(footer));
-    crc = crc16_ccitt_update(crc, (uint8_t *)&footer, sizeof(footer));
-
-    // include inverted CRC in big endian format in the CRC
-    const uint16_t invertedBigEndianCrc = ~(((crc & 0xFF) << 8) | (crc >> 8));
-    config_streamer_write(&streamer, (uint8_t *)&invertedBigEndianCrc, sizeof(crc));
-
-    config_streamer_flush(&streamer);
-
-    const bool success = config_streamer_finish(&streamer) == 0;
-
-    return success;
 }
 
 void writeConfigToEEPROM(void)
@@ -269,15 +553,24 @@ void writeConfigToEEPROM(void)
     bool success = false;
     // write it
     for (int attempt = 0; attempt < 3 && !success; attempt++) {
-        if (writeSettingsToEEPROM()) {
+        if (writeSettingsToEEPROM() && isEEPROMVersionValid() && isEEPROMStructureValid()) {
             success = true;
+
+#if defined(CONFIG_IN_EXTERNAL_FLASH) || defined(CONFIG_IN_MEMORY_MAPPED_FLASH)
+            // copy it back from flash to the in-memory buffer.
+            success = loadEEPROMFromExternalFlash();
+#endif
+#ifdef CONFIG_IN_SDCARD
+            // copy it back from flash to the in-memory buffer.
+            success = loadEEPROMFromSDCard();
+#endif
         }
     }
 
-    if (success && isEEPROMContentValid()) {
+    if (success) {
         return;
     }
 
     // Flash write failed - just die now
-    failureMode(FAILURE_FLASH_WRITE_FAILED);
+    failureMode(FAILURE_CONFIG_STORE_FAILURE);
 }

@@ -17,21 +17,53 @@
 
 #pragma once
 
+#include <stdio.h>
+#include <stdint.h>
+
 #define USE_PARAMETER_GROUPS
+
+#define IOCFG_OUT_PP         0
+#define IOCFG_OUT_OD         0
+#define IOCFG_AF_PP          0
+#define IOCFG_AF_OD          0
+#define IOCFG_IPD            0
+#define IOCFG_IPU            0
+#define IOCFG_IN_FLOATING    0
 
 #define U_ID_0 0
 #define U_ID_1 1
 #define U_ID_2 2
 
-#define MAX_PROFILE_COUNT 3
-#define MAG
-#define BARO
-#define GPS
+#define NOINLINE
+#define FAST_CODE
+#define FAST_IRQ_HANDLER
+#define FAST_CODE_NOINLINE
+#define FAST_CODE_NOINLINE_CRITICAL
+#define FAST_CODE_PREF
+#define FAST_DATA_ZERO_INIT
+#define FAST_DATA
+#define RAM_CODE
+
+
+#define PID_PROFILE_COUNT 4
+#define CONTROL_RATE_PROFILE_COUNT 4
+#define BATTERY_PROFILE_COUNT 3
+#define USE_MAG
+#define USE_BARO
+#define USE_GPS
 #define USE_DASHBOARD
-#define TELEMETRY
-#define LED_STRIP
+#define USE_TELEMETRY
+#define USE_LED_STRIP
 #define USE_SERVOS
-#define TRANSPONDER
+#define USE_TRANSPONDER
+
+#ifndef LED_STRIP_MAX_LENGTH
+    #ifdef USE_LED_STRIP_64
+        #define LED_STRIP_MAX_LENGTH           64
+    #else
+        #define LED_STRIP_MAX_LENGTH           32
+    #endif
+#endif // #ifndef LED_STRIP_MAX_LENGTH
 
 typedef enum
 {
@@ -42,30 +74,14 @@ typedef enum
 typedef enum {RESET = 0, SET = !RESET} FlagStatus, ITStatus;
 typedef enum {DISABLE = 0, ENABLE = !DISABLE} FunctionalState;
 typedef enum {TEST_IRQ = 0 } IRQn_Type;
-typedef enum {
-    EXTI_Trigger_Rising = 0x08,
-    EXTI_Trigger_Falling = 0x0C,
-    EXTI_Trigger_Rising_Falling = 0x10
-} EXTITrigger_TypeDef;
-
-typedef struct
-{
-    void *test;
-} GPIO_TypeDef;
-
-typedef struct
-{
-    void* test;
-} TIM_TypeDef;
-
-typedef struct
-{
-    void* test;
-} TIM_OCInitTypeDef;
 
 typedef struct {
     void* test;
 } DMA_TypeDef;
+
+typedef struct {
+    void* test;
+} DMA_InitTypeDef;
 
 typedef struct {
     void* test;
@@ -75,17 +91,36 @@ uint8_t DMA_GetFlagStatus(void *);
 void DMA_Cmd(DMA_Channel_TypeDef*, FunctionalState );
 void DMA_ClearFlag(uint32_t);
 
-typedef struct
-{
-    void* test;
-} SPI_TypeDef;
+struct spiResource_s;
+struct quadSpiResource_s;
+struct octoSpiResource_s;
+struct i2cResource_s;
+
+typedef struct USART_TypeDef_s USART_TypeDef;
 
 typedef struct
 {
     void* test;
-} USART_TypeDef;
+} ADC_TypeDef;
+
+#ifndef SPIDEV_COUNT
+#define SPIDEV_COUNT 0
+#endif
+#define I2CDEV_COUNT 0
+#ifndef GYRO_COUNT
+#define GYRO_COUNT 1
+#endif
 
 #define WS2811_DMA_TC_FLAG (void *)1
 #define WS2811_DMA_HANDLER_IDENTIFER 0
+#define NVIC_PriorityGroup_2 0x500
+#define NVIC_PRIORITY_GROUPING NVIC_PriorityGroup_2
+#define NVIC_BUILD_PRIORITY(base,sub) (((((base)<<(4-(7-(NVIC_PRIORITY_GROUPING>>8))))|((sub)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING>>8)))))<<4)&0xf0)
+#define NVIC_PRIORITY_BASE(prio) (((prio)>>(4-(7-(NVIC_PRIORITY_GROUPING>>8))))>>4)
+#define NVIC_PRIORITY_SUB(prio) (((prio)>>4)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING>>8))))
+
+#define MCU_TYPE_NAME "UNIT_TEST"
 
 #include "target.h"
+
+#include "target/common_defaults_post.h"

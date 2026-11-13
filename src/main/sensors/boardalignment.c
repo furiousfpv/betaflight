@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -20,21 +23,38 @@
 #include <math.h>
 #include <string.h>
 
-#include "common/maths.h"
-#include "common/axis.h"
+#include "platform.h"
 
-#include "config/parameter_group.h"
-#include "config/parameter_group_ids.h"
+#include "common/utils.h"
+#include "common/sensor_alignment.h"
+
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
 
 #include "drivers/sensor.h"
 
 #include "boardalignment.h"
 
 static bool standardBoardAlignment = true;     // board orientation correction
-static float boardRotation[3][3];              // matrix
+static matrix33_t boardRotation;
 
-// no template required since defaults are zero
-PG_REGISTER(boardAlignment_t, boardAlignment, PG_BOARD_ALIGNMENT, 0);
+PG_REGISTER_WITH_RESET_TEMPLATE(boardAlignment_t, boardAlignment, PG_BOARD_ALIGNMENT, 1);
+
+#ifndef DEFAULT_ALIGN_BOARD_ROLL
+#define DEFAULT_ALIGN_BOARD_ROLL 0
+#endif
+#ifndef DEFAULT_ALIGN_BOARD_PITCH
+#define DEFAULT_ALIGN_BOARD_PITCH 0
+#endif
+#ifndef DEFAULT_ALIGN_BOARD_YAW
+#define DEFAULT_ALIGN_BOARD_YAW 0
+#endif
+
+PG_RESET_TEMPLATE(boardAlignment_t, boardAlignment,
+        .rollDegrees = DEFAULT_ALIGN_BOARD_ROLL,
+        .pitchDegrees = DEFAULT_ALIGN_BOARD_PITCH,
+        .yawDegrees = DEFAULT_ALIGN_BOARD_YAW,
+);
 
 static bool isBoardAlignmentStandard(const boardAlignment_t *boardAlignment)
 {
@@ -54,70 +74,72 @@ void initBoardAlignment(const boardAlignment_t *boardAlignment)
     rotationAngles.angles.pitch = degreesToRadians(boardAlignment->pitchDegrees);
     rotationAngles.angles.yaw   = degreesToRadians(boardAlignment->yawDegrees  );
 
-    buildRotationMatrix(&rotationAngles, boardRotation);
+    buildRotationMatrix(&boardRotation, &rotationAngles);
 }
 
-static void alignBoard(int32_t *vec)
+static void alignBoard(vector3_t *vec)
 {
-    int32_t x = vec[X];
-    int32_t y = vec[Y];
-    int32_t z = vec[Z];
-
-    vec[X] = lrintf(boardRotation[0][X] * x + boardRotation[1][X] * y + boardRotation[2][X] * z);
-    vec[Y] = lrintf(boardRotation[0][Y] * x + boardRotation[1][Y] * y + boardRotation[2][Y] * z);
-    vec[Z] = lrintf(boardRotation[0][Z] * x + boardRotation[1][Z] * y + boardRotation[2][Z] * z);
+    applyRotationMatrix(vec, &boardRotation);
 }
 
-void alignSensors(int32_t *dest, uint8_t rotation)
+FAST_CODE_NOINLINE void alignSensorViaMatrix(vector3_t *dest, matrix33_t *sensorRotationMatrix)
 {
-    const int32_t x = dest[X];
-    const int32_t y = dest[Y];
-    const int32_t z = dest[Z];
+    applyRotationMatrix(dest, sensorRotationMatrix);
+
+    if (!standardBoardAlignment) {
+        alignBoard(dest);
+    }
+}
+
+void alignSensorViaRotation(vector3_t *dest, sensor_align_e rotation)
+{
+    const vector3_t tmp = *dest;
 
     switch (rotation) {
     default:
     case CW0_DEG:
-        dest[X] = x;
-        dest[Y] = y;
-        dest[Z] = z;
+        dest->x = tmp.x;
+        dest->y = tmp.y;
+        dest->z = tmp.z;
         break;
     case CW90_DEG:
-        dest[X] = y;
-        dest[Y] = -x;
-        dest[Z] = z;
+        dest->x = tmp.y;
+        dest->y = -tmp.x;
+        dest->z = tmp.z;
         break;
     case CW180_DEG:
-        dest[X] = -x;
-        dest[Y] = -y;
-        dest[Z] = z;
+        dest->x = -tmp.x;
+        dest->y = -tmp.y;
+        dest->z = tmp.z;
         break;
     case CW270_DEG:
-        dest[X] = -y;
-        dest[Y] = x;
-        dest[Z] = z;
+        dest->x = -tmp.y;
+        dest->y = tmp.x;
+        dest->z = tmp.z;
         break;
     case CW0_DEG_FLIP:
-        dest[X] = -x;
-        dest[Y] = y;
-        dest[Z] = -z;
+        dest->x = -tmp.x;
+        dest->y = tmp.y;
+        dest->z = -tmp.z;
         break;
     case CW90_DEG_FLIP:
-        dest[X] = y;
-        dest[Y] = x;
-        dest[Z] = -z;
+        dest->x = tmp.y;
+        dest->y = tmp.x;
+        dest->z = -tmp.z;
         break;
     case CW180_DEG_FLIP:
-        dest[X] = x;
-        dest[Y] = -y;
-        dest[Z] = -z;
+        dest->x = tmp.x;
+        dest->y = -tmp.y;
+        dest->z = -tmp.z;
         break;
     case CW270_DEG_FLIP:
-        dest[X] = -y;
-        dest[Y] = -x;
-        dest[Z] = -z;
+        dest->x = -tmp.y;
+        dest->y = -tmp.x;
+        dest->z = -tmp.z;
         break;
     }
 
-    if (!standardBoardAlignment)
+    if (!standardBoardAlignment) {
         alignBoard(dest);
+    }
 }

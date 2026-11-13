@@ -1,73 +1,70 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 
 #include "platform.h"
+#include "common/utils.h"
+
+#ifdef USE_ADC
 
 #include "build/build_config.h"
 #include "build/debug.h"
+#include "drivers/io.h"
 
-#include "drivers/system.h"
+#include "pg/adc.h"
 
 #include "adc.h"
-#include "adc_impl.h"
-
-#include "common/utils.h"
 
 //#define DEBUG_ADC_CHANNELS
 
-#ifdef USE_ADC
-adcOperatingConfig_t adcOperatingConfig[ADC_CHANNEL_COUNT];
-volatile uint16_t adcValues[ADC_CHANNEL_COUNT];
+#ifdef USE_ADC_INTERNAL
 
-uint8_t adcChannelByTag(ioTag_t ioTag)
+/**
+ * Use a measurement of the fixed internal vref to calculate the external Vref+
+ *
+ * The ADC full range reading equates to Vref+ on the channel. Vref+ is typically
+ * fed from Vcc at 3.3V, but since Vcc isn't a critical value it may be off
+ * by a little due to variation in the regulator. Some chips are provided with a
+ * known internal voltage reference, typically around 1.2V. By measuring this
+ * reference with an internally connected ADC channel we can then calculate a more
+ * accurate value for Vref+ instead of assuming that it is 3.3V
+ *
+ * @param intVRefAdcValue reading from the internal calibration voltage
+ *
+ * @return the calculated value of Vref+
+*/
+uint16_t adcInternalCompensateVref(uint16_t intVRefAdcValue)
 {
-    for (uint8_t i = 0; i < ARRAYLEN(adcTagMap); i++) {
-        if (ioTag == adcTagMap[i].tag)
-            return adcTagMap[i].channel;
-    }
-    return 0;
+    // This is essentially a tuned version of
+    // __HAL_ADC_CALC_VREFANALOG_VOLTAGE(vrefAdcValue, ADC_RESOLUTION_12B);
+    return (uint16_t)((uint32_t)(adcVREFINTCAL * VREFINT_CAL_VREF) / intVRefAdcValue);
 }
 
-uint16_t adcGetChannel(uint8_t channel)
+int16_t adcInternalComputeTemperature(uint16_t tempAdcValue, uint16_t vrefValue)
 {
-#ifdef DEBUG_ADC_CHANNELS
-    if (adcOperatingConfig[0].enabled) {
-        debug[0] = adcValues[adcOperatingConfig[0].dmaIndex];
-    }
-    if (adcOperatingConfig[1].enabled) {
-        debug[1] = adcValues[adcOperatingConfig[1].dmaIndex];
-    }
-    if (adcOperatingConfig[2].enabled) {
-        debug[2] = adcValues[adcOperatingConfig[2].dmaIndex];
-    }
-    if (adcOperatingConfig[3].enabled) {
-        debug[3] = adcValues[adcOperatingConfig[3].dmaIndex];
-    }
-#endif
-    return adcValues[adcOperatingConfig[channel].dmaIndex];
-}
+    // This is essentially a tuned version of
+    // __HAL_ADC_CALC_TEMPERATURE(vrefValue, tempAdcValue, ADC_RESOLUTION_12B);
 
-#else
-uint16_t adcGetChannel(uint8_t channel)
-{
-    UNUSED(channel);
-    return 0;
+    return ((((int32_t)((tempAdcValue * vrefValue) / TEMPSENSOR_CAL_VREFANALOG) - adcTSCAL1) * adcTSSlopeK) + 500) / 1000 + TEMPSENSOR_CAL1_TEMP;
 }
+#endif // USE_ADC_INTERNAL
 #endif

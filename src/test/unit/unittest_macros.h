@@ -17,5 +17,6 @@
 
 #pragma once
 
-
+#if !defined(UNUSED)
 #define UNUSED(x) (void)(x)
+#endif

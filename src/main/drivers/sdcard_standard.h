@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
@@ -193,6 +196,7 @@ typedef struct sdcardCSD_t {
 #define SDCARD_CSD_V2_TRAILER_OFFSET                     127
 #define SDCARD_CSD_V2_TRAILER_LEN                        1
 
+#define SDCARD_IDLE_TOKEN                       0xFF
 #define SDCARD_SINGLE_BLOCK_READ_START_TOKEN    0xFE
 #define SDCARD_SINGLE_BLOCK_WRITE_START_TOKEN   0xFE
 #define SDCARD_MULTIPLE_BLOCK_WRITE_START_TOKEN 0xFC
@@ -200,14 +204,14 @@ typedef struct sdcardCSD_t {
 
 #define SDCARD_BLOCK_SIZE 512
 
-// Idle bit is set to 1 only when idle during intialization phase:
-#define SDCARD_R1_STATUS_BIT_IDLE                 1
-#define SDCARD_R1_STATUS_BIT_ERASE_RESET          2
-#define SDCARD_R1_STATUS_BIT_ILLEGAL_COMMAND      4
-#define SDCARD_R1_STATUS_BIT_COM_CRC_ERROR        8
-#define SDCARD_R1_STATUS_BIT_ERASE_SEQUENCE_ERROR 16
-#define SDCARD_R1_STATUS_BIT_ADDRESS_ERROR        32
-#define SDCARD_R1_STATUS_BIT_PARAMETER_ERROR      64
+// Idle bit is set to 1 only when idle during initialization phase:
+#define SDCARD_R1_STATUS_BIT_IDLE                 0x01
+#define SDCARD_R1_STATUS_BIT_ERASE_RESET          0x02
+#define SDCARD_R1_STATUS_BIT_ILLEGAL_COMMAND      0x04
+#define SDCARD_R1_STATUS_BIT_COM_CRC_ERROR        0x08
+#define SDCARD_R1_STATUS_BIT_ERASE_SEQUENCE_ERROR 0x10
+#define SDCARD_R1_STATUS_BIT_ADDRESS_ERROR        0x20
+#define SDCARD_R1_STATUS_BIT_PARAMETER_ERROR      0x40
 
 #define SDCARD_CSD_STRUCTURE_VERSION_1      0
 #define SDCARD_CSD_STRUCTURE_VERSION_2      1

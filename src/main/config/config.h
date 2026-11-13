@@ -1,0 +1,108 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "pg/pg.h"
+
+typedef enum {
+    CONFIGURATION_STATE_UNCONFIGURED = 0,
+    CONFIGURATION_STATE_CONFIGURED,
+} configurationState_e;
+
+typedef enum {
+    CONFIG_RESET_NONE = 0,
+    CONFIG_RESET_EMPTY,
+    CONFIG_RESET_CORRUPT,
+    CONFIG_RESET_VERSION,
+    CONFIG_RESET_PG_MISSING,
+    CONFIG_RESET_PG_VERSION,
+    CONFIG_RESET_BOARD,
+    CONFIG_RESET_CLI,
+    CONFIG_RESET_MSP,
+    CONFIG_RESET_BUTTON,
+    CONFIG_RESET_SERIAL,
+    CONFIG_RESET_PG_SIZE,
+    CONFIG_RESET_COUNT
+} configResetReason_e;
+
+typedef struct systemConfig_s {
+    uint8_t pidProfileIndex;
+    uint8_t activeRateProfile;
+    uint8_t debug_mode;
+    uint8_t task_statistics;
+    uint8_t rateProfile6PosSwitch;
+    uint8_t cpu_overclock;
+    uint8_t powerOnArmingGraceTime; // in seconds
+    char boardIdentifier[sizeof(TARGET_BOARD_IDENTIFIER) + 1];
+    uint8_t hseMhz;                 // Only used for F4 and G4 targets
+    uint8_t configurationState;     // The state of the configuration (defaults / configured)
+    uint8_t enableStickArming; // boolean that determines whether stick arming can be used
+    uint8_t activeBatteryProfile;
+    uint8_t configResetReason;
+    uint16_t configResetDetail;     // stored EEPROM version or pgn, depending on configResetReason
+} systemConfig_t;
+
+PG_DECLARE(systemConfig_t, systemConfig);
+
+struct pidProfile_s;
+extern struct pidProfile_s *currentPidProfile;
+
+void initEEPROM(void);
+bool resetEEPROM(configResetReason_e reason, uint16_t detail);
+void resetEEPROMOnLoadFault(void);
+bool readEEPROM(void);
+void writeEEPROM(void);
+void writeUnmodifiedConfigToEEPROM(void);
+void ensureEEPROMStructureIsValid(void);
+
+void saveConfigAndNotify(void);
+void validateAndFixGyroConfig(void);
+#ifdef USE_BLACKBOX
+void validateAndFixBlackBox(void);
+#endif
+
+void setConfigDirty(void);
+bool isConfigDirty(void);
+
+uint8_t getCurrentPidProfileIndex(void);
+void changePidProfile(uint8_t pidProfileIndex);
+void changePidProfileFromCellCount(uint8_t cellCount);
+
+uint8_t getCurrentControlRateProfileIndex(void);
+void changeControlRateProfile(uint8_t profileIndex);
+
+uint8_t getCurrentBatteryProfileIndex(void);
+void changeBatteryProfile(uint8_t profileIndex);
+
+bool canSoftwareSerialBeUsed(void);
+
+void resetConfig(void);
+void targetConfiguration(void);
+void targetValidateConfiguration(void);
+void configTargetPreInit(void);
+
+bool isSystemConfigured(void);
+void setRebootRequired(void);
+bool getRebootRequired(void);
+bool isEepromWriteInProgress(void);

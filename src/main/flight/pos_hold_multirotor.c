@@ -1,0 +1,179 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Betaflight. If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "platform.h"
+
+#ifndef USE_WING
+
+#ifdef USE_POSITION_HOLD
+
+#include "math.h"
+#include "build/debug.h"
+#include "common/maths.h"
+
+#include "config/config.h"
+#include "fc/core.h"
+#include "fc/runtime_config.h"
+#include "fc/rc.h"
+#include "flight/autopilot.h"
+#include "flight/failsafe.h"
+#include "flight/imu.h"
+#include "flight/position.h"
+#include "flight/position_estimator.h"
+#include "rx/rx.h"
+#include "scheduler/scheduler.h"
+
+#include "pg/pos_hold.h"
+#include "pos_hold.h"
+
+// TASK_POSHOLD is event driven off positionEstimatorUpdate(), so the control law
+// sees each new position estimate immediately rather than up to a task period
+// later. If the estimator is not running at all (TASK_POSITION disabled) this is
+// the interval after which the task falls back to periodic scheduling, so that
+// mode entry and exit are still serviced.
+#define POSHOLD_FALLBACK_PERIOD_US (2 * TASK_PERIOD_HZ(POSHOLD_TASK_RATE_HZ))
+
+typedef struct posHoldState_s {
+    bool isEnabled;
+    bool isControlOk;
+    bool areSensorsOk;
+    float deadband;
+} posHoldState_t;
+
+static posHoldState_t posHold;
+
+void posHoldInit(void)
+{
+    posHold.deadband = posHoldConfig()->deadband * 0.01f;
+}
+
+static void posHoldCheckSticks(void)
+{
+    if (failsafeIsActive() || FLIGHT_MODE(GPS_RESCUE_MODE)) {
+        setSticksActiveStatus(false);
+        return;
+    }
+    const bool sticksDeflected = (getRcDeflectionAbs(FD_ROLL) > posHold.deadband) || (getRcDeflectionAbs(FD_PITCH) > posHold.deadband);
+    setSticksActiveStatus(sticksDeflected);
+}
+
+static bool sensorsOk(bool allowHeadingRecovery)
+{
+    if (!positionEstimatorIsValidXY()) {
+        DEBUG_SET(DEBUG_AUTOPILOT_HEADING, 6, 1);  //!< Position Hold Sensor Status
+        return false;
+    }
+
+    if (positionEstimatorIsHeadingRequired()) {
+        if (!imuIsHeadingValid() && !allowHeadingRecovery) {
+            DEBUG_SET(DEBUG_AUTOPILOT_HEADING, 6, 2);  //!< Position Hold Sensor Status
+            return false;
+        }
+    }
+
+    DEBUG_SET(DEBUG_AUTOPILOT_HEADING, 6, 0);  //!< Position Hold Sensor Status
+    return true;
+}
+bool posHoldUpdateCheck(timeUs_t currentTimeUs, timeDelta_t currentDeltaTimeUs)
+{
+    UNUSED(currentTimeUs);
+
+    if (positionEstimatorTakeUpdate(POS_EST_CONSUMER_POSHOLD)) {
+        return true;
+    }
+
+    // No estimator running, so fall back to periodic scheduling
+    return currentDeltaTimeUs >= POSHOLD_FALLBACK_PERIOD_US;
+}
+
+void updatePosHold(timeUs_t currentTimeUs)
+{
+    UNUSED(currentTimeUs);
+
+    static bool gpsRescueWasActive = false;
+
+    const bool gpsRescueActive = FLIGHT_MODE(GPS_RESCUE_MODE);
+    const bool gpsRescueStarting = gpsRescueActive && !gpsRescueWasActive;
+
+    if (gpsRescueStarting && posHold.isEnabled) {
+        initPositionHold();
+    }
+
+    if (FLIGHT_MODE(POS_HOLD_MODE) || gpsRescueActive) {
+        if (!posHold.isEnabled) {
+            resetPositionControl(POSHOLD_TASK_RATE_HZ);
+            posHold.isControlOk = true;
+            posHold.isEnabled = true;
+        }
+    } else {
+        if (posHold.isEnabled) {
+            setSticksActiveStatus(false);
+            // positionControl() stops being called from here, so the yaw controller
+            // can no longer stand itself down; do it for it.
+            autopilotDisableYawControl();
+        }
+        posHold.isEnabled = false;
+    }
+    gpsRescueWasActive = gpsRescueActive;
+
+    if (posHold.isEnabled) {
+        posHoldCheckSticks();
+        const bool sensorsWereOk = posHold.areSensorsOk;
+        posHold.areSensorsOk = sensorsOk(isHeadingRecoveryActive());
+        if (posHold.areSensorsOk) {
+            if (!sensorsWereOk) {
+                // Sensors came back after a dropout: the craft drifted while
+                // blind, so resuming against the pre-dropout target would
+                // lurch toward it — or trip the sanity fence on the spot.
+                // Re-anchor the hold at the current position instead.
+                autopilotSetSensorsOkStatus(true); // clear the latched SensorsNotOk bit
+                positionControlReanchor();
+            }
+            posHold.isControlOk = positionControl();
+        } else {
+            // Latch the SensorsNotOk failure bit; positionControl() is skipped while
+            // sensors are out, so the AUTOPILOT_PID / AUTOPILOT_STOP slots are
+            // written here to keep the log honest.
+            autopilotSetSensorsOkStatus(false);
+            for (unsigned i = 0; i < RP_AXIS_COUNT; i++) {
+                autopilotAngle[i] = 0.0f;
+            }
+            // positionControl() is skipped, so the yaw controller cannot stand itself
+            // down; leaving it active would keep injecting the last rate.
+            autopilotDisableYawControl();
+        }
+    }
+}
+
+bool isAutopilotInControl(void)
+{
+    return posHold.isEnabled && posHold.isControlOk && posHold.areSensorsOk;
+}
+
+bool posHoldFailure(void) {
+    return FLIGHT_MODE(POS_HOLD_MODE) && (!posHold.isControlOk || !posHold.areSensorsOk);
+}
+
+// Pre-engagement readiness: the entry conditions alone, without the
+// control-failure checks in posHoldFailure() that only apply once engaged.
+bool posHoldReady(void) {
+    return sensorsOk(false);
+}
+
+#endif // USE_POSITION_HOLD
+
+#endif // !USE_WING

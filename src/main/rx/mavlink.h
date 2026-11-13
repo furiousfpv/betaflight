@@ -1,0 +1,46 @@
+/*
+ * This file is part of Cleanflight.
+ *
+ * Cleanflight is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Cleanflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#define MAVLINK_COMM_NUM_BUFFERS 2
+#define RSSI_DBM_MIN (-130)
+#define RSSI_DBM_MAX 0
+
+#if defined(USE_SERIALRX_MAVLINK) || defined(USE_TELEMETRY_MAVLINK)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-function"
+#pragma GCC diagnostic ignored "-Waddress-of-packed-member"
+#include "common/mavlink.h"
+#pragma GCC diagnostic pop
+#endif
+
+bool mavlinkRxInit(const rxConfig_t *initialRxConfig, rxRuntimeState_t *rxRuntimeState);
+#if defined(USE_SERIALRX_MAVLINK)
+bool isValidMavlinkTxBuffer (void);
+bool shouldSendMavlinkTelemetry(void);
+#define MAVLINK_RX_QUEUE_SIZE 16
+typedef struct mavlinkRxQueue_s {
+    mavlink_message_t msgs[MAVLINK_RX_QUEUE_SIZE];
+    volatile uint8_t head;
+    volatile uint8_t tail;
+} mavlinkRxQueue_t;
+bool mavlinkGetNextQueueMessage(mavlink_message_t *msg);
+#else
+static inline bool isValidMavlinkTxBuffer(void) { return false; }
+static inline bool shouldSendMavlinkTelemetry(void) { return false; }
+#endif

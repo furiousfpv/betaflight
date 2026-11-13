@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 // This file borrows heavily from project Deviation,
@@ -22,7 +25,7 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <platform.h>
+#include "platform.h"
 
 #ifdef USE_RX_H8_3D
 
@@ -30,14 +33,16 @@
 
 #include "common/utils.h"
 
-#include "drivers/rx_nrf24l01.h"
-#include "drivers/rx_xn297.h"
-#include "drivers/system.h"
+#include "pg/rx.h"
+
+#include "drivers/io.h"
+#include "drivers/rx/rx_nrf24l01.h"
+#include "drivers/rx/rx_xn297.h"
+#include "drivers/time.h"
 
 #include "rx/rx.h"
 #include "rx/rx_spi.h"
 #include "rx/nrf24_h8_3d.h"
-
 
 /*
  * Deviation transmitter sends 345 bind packets, then starts sending data packets.
@@ -45,7 +50,6 @@
  * This means binding phase lasts 1.4 seconds, the transmitter then enters the data phase.
  * Other transmitters may vary but should have similar characteristics.
  */
-
 
 /*
  * H8_3D Protocol
@@ -87,7 +91,7 @@ STATIC_UNIT_TESTED uint8_t payloadSize;
 STATIC_UNIT_TESTED uint8_t rxTxAddrXN297[RX_TX_ADDR_LEN] = {0x41, 0xbd, 0x42, 0xd4, 0xc2}; // converted XN297 address
 #define TX_ID_LEN 4
 STATIC_UNIT_TESTED uint8_t txId[TX_ID_LEN];
-uint32_t *rxSpiIdPtr;
+static uint32_t *rxSpiIdPtr;
 
 // radio channels for frequency hopping
 #define H8_3D_RF_CHANNEL_COUNT 4
@@ -125,8 +129,6 @@ STATIC_UNIT_TESTED bool h8_3dCheckBindPacket(const uint8_t *payload)
 
 STATIC_UNIT_TESTED uint16_t h8_3dConvertToPwm(uint8_t val, int16_t _min, int16_t _max)
 {
-#define PWM_RANGE (PWM_RANGE_MAX - PWM_RANGE_MIN)
-
     int32_t ret = val;
     const int32_t range = _max - _min;
     ret = PWM_RANGE_MIN + ((ret - _min) * PWM_RANGE)/range;
@@ -277,9 +279,13 @@ static void h8_3dNrf24Setup(rx_spi_protocol_e protocol, const uint32_t *rxSpiId)
     NRF24L01_SetRxMode(); // enter receive mode to start listening for packets
 }
 
-void h8_3dNrf24Init(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool h8_3dNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = RC_CHANNEL_COUNT;
-    h8_3dNrf24Setup((rx_spi_protocol_e)rxConfig->rx_spi_protocol, &rxConfig->rx_spi_id);
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = RC_CHANNEL_COUNT;
+    h8_3dNrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol, &rxSpiConfig->rx_spi_id);
+
+    return true;
 }
 #endif

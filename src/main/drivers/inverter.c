@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -20,98 +23,60 @@
 
 #include "platform.h"
 
+#ifdef USE_INVERTER
+
+#include "io/serial.h"
 #include "drivers/io.h"
-#include "io_impl.h"
+#include "drivers/serial.h"
+#include "drivers/serial_impl.h"
 
 #include "inverter.h"
 
-#ifdef USE_INVERTER
-static void inverterSet(IO_t pin, bool on)
+static const serialPinConfig_t *pSerialPinConfig;
+
+static IO_t findInverterPin(serialPortIdentifier_e identifier)
+{
+    const int resourceIndex = serialResourceIndex(identifier);
+    if (resourceIndex >= 0 && resourceIndex < (int)ARRAYLEN(pSerialPinConfig->ioTagInverter)) {
+        return IOGetByTag(pSerialPinConfig->ioTagInverter[resourceIndex]);
+    } else {
+        return NULL;
+    }
+}
+
+static void inverterSet(IO_t pin,  bool on)
 {
     IOWrite(pin, on);
 }
 
-static void initInverter(ioTag_t ioTag)
+static void initInverter(serialPortIdentifier_e identifier)
 {
-    IO_t pin = IOGetByTag(ioTag);
-    IOInit(pin, OWNER_INVERTER, 1);
-    IOConfigGPIO(pin, IOCFG_OUT_PP);
-
-    inverterSet(pin, false);
-}
-#endif
-
-void initInverters(void)
-{
-#ifdef INVERTER_PIN_UART1
-    initInverter(IO_TAG(INVERTER_PIN_UART1));
-#endif
-
-#ifdef INVERTER_PIN_UART2
-    initInverter(IO_TAG(INVERTER_PIN_UART2));
-#endif
-
-#ifdef INVERTER_PIN_UART3
-    initInverter(IO_TAG(INVERTER_PIN_UART3));
-#endif
-
-#ifdef INVERTER_PIN_UART4
-    initInverter(IO_TAG(INVERTER_PIN_UART4));
-#endif
-
-#ifdef INVERTER_PIN_UART5
-    initInverter(IO_TAG(INVERTER_PIN_UART5));
-#endif
-
-#ifdef INVERTER_PIN_UART6
-    initInverter(IO_TAG(INVERTER_PIN_UART6));
-#endif
+    IO_t pin = findInverterPin(identifier);
+    if (pin) {
+        const int ownerIndex = serialOwnerIndex(identifier);
+        // only UART supports inverter, so OWNER_INVERTER+ownerIndex does work
+        IOInit(pin, OWNER_INVERTER, ownerIndex);
+        IOConfigGPIO(pin, IOCFG_OUT_PP);
+        inverterSet(pin, false);
+    }
 }
 
-void enableInverter(USART_TypeDef *USARTx, bool on)
+void initInverters(const serialPinConfig_t *serialPinConfigToUse)
 {
-#ifdef USE_INVERTER
-    IO_t pin = IO_NONE;
+    pSerialPinConfig = serialPinConfigToUse;
 
-#ifdef INVERTER_PIN_UART1
-    if (USARTx == USART1) {
-        pin = IOGetByTag(IO_TAG(INVERTER_PIN_UART1));
+    for (unsigned i = 0; i < ARRAYLEN(serialPortIdentifiers); i++) {
+        // it is safe to pass port without inverter
+        initInverter(serialPortIdentifiers[i]);
     }
-#endif
-
-#ifdef INVERTER_PIN_UART2
-    if (USARTx == USART2) {
-        pin = IOGetByTag(IO_TAG(INVERTER_PIN_UART2));
-    }
-#endif
-
-#ifdef INVERTER_PIN_UART3
-    if (USARTx == USART3) {
-        pin = IOGetByTag(IO_TAG(INVERTER_PIN_UART3));
-    }
-#endif
-
-#ifdef INVERTER_PIN_UART4
-    if (USARTx == UART4) {
-        pin = IOGetByTag(IO_TAG(INVERTER_PIN_UART4));
-    }
-#endif
-
-#ifdef INVERTER_PIN_UART5
-    if (USARTx == UART5) {
-        pin = IOGetByTag(IO_TAG(INVERTER_PIN_UART5));
-    }
-#endif
-
-#ifdef INVERTER_PIN_UART6
-    if (USARTx == USART6) {
-        pin = IOGetByTag(IO_TAG(INVERTER_PIN_UART6));
-    }
-#endif
-
-    inverterSet(pin, on);
-#else
-    UNUSED(USARTx);
-    UNUSED(on);
-#endif
 }
+
+void enableInverter(serialPortIdentifier_e identifier, bool on)
+{
+    const IO_t pin = findInverterPin(identifier);
+    if (pin) {
+        inverterSet(pin, on);
+    }
+}
+
+#endif // USE_INVERTER

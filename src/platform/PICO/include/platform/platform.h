@@ -1,0 +1,196 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+// pico sdk header includes
+#include "RP2350.h"
+#include "pico.h"
+#include "pico/stdlib.h"
+#include "hardware/dma.h"
+#include "hardware/flash.h"
+#include "hardware/i2c.h"
+#include "hardware/spi.h"
+#include "hardware/uart.h"
+#include "pico_trace.h"
+
+// Revert MAX, MIN definitions because they are unsafe for general use (double evaluations).
+// Code that requires MAX, MIN should include common/maths.h
+#undef MAX
+#undef MIN
+
+#define NVIC_PriorityGroup_2         0x500
+#define PLATFORM_NO_LIBC             0
+#define DEFIO_PORT_PINS              64
+
+#ifdef RP2350
+
+typedef enum {DISABLE = 0, ENABLE = !DISABLE} FunctionalState;
+
+#define I2C_INST(i2c)        ((i2c_inst_t *)(i2c))
+
+#define DMA_TypeDef          void*
+#define DMA_InitTypeDef      dma_channel_config
+
+#define ADC_TypeDef          void*
+
+#define UART_INST(uart)      ((uart_inst_t *)(uart))
+
+#define TIM_OCInitTypeDef    void*
+#define TIM_ICInitTypeDef    void*
+
+// SPI_TypeDef alias removed: use spiResource_t* in generic code, cast to SPI0_Type* in platform code.
+// SPI_INST converts to the correct type for use in pico-sdk functions.
+#define SPI_INST(spi)        ((spi_inst_t *)(spi))
+
+// quadSpiResource_s: platform-specific definition of the opaque quadSpiResource_t.
+// PICO has no hardware QUADSPI peripheral; this is a placeholder struct.
+struct quadSpiResource_s
+{
+    void* test;
+};
+
+#define MAX_QUADSPI_PIN_SEL  1
+
+#define QUADSPI_TRAIT_CS_SOFTWARE       1
+#define QUADSPI_TRAIT_SEQUENCE          1
+
+#endif
+
+#define DMA_DATA_ZERO_INIT
+#define DMA_DATA
+#define STATIC_DMA_DATA_AUTO            static
+
+#if PICO_COPY_TO_RAM == 0
+#define FAST_CODE                       __attribute__((section(".fastcode")))
+#else
+#define FAST_CODE
+#endif
+
+#define FAST_IRQ_HANDLER                FAST_CODE
+
+
+#define DEFAULT_CPU_OVERCLOCK           0
+
+#ifdef TEST_SLOW_SCHEDULE
+// (testing) allow time for more / all tasks
+// 1000 // 50000 // 125 // 125us = 8kHz
+#define TASK_GYROPID_DESIRED_PERIOD     30000
+#else
+// 125us = 8kHz
+#define TASK_GYROPID_DESIRED_PERIOD     125
+#endif
+
+#define SCHEDULER_DELAY_LIMIT           10
+
+// GPIO_PIN_ definitions for ease of compatibility with stm32 targets
+#define GPIO_PIN_RESET (0)
+#define GPIO_PIN_SET   (1)
+
+// There is no library definition for pupd, so define one here
+#define GPIO_PULLUP     1
+#define GPIO_PULLDOWN   2
+
+// speed will either GPIO_SLEW_RATE_SLOW or GPIO_SLEW_RATE_FAST
+#define IO_CONFIG(mode, speed, pupd) ((mode) | ((speed) << 2) | ((pupd) << 5))
+
+// TODO update these and IOConfigGPIO
+#define IOCFG_OUT_PP          IO_CONFIG(GPIO_OUT, 0, 0)
+#define IOCFG_OUT_OD          IO_CONFIG(GPIO_OUT, 0, 0)
+#define IOCFG_AF_PP           0
+#define IOCFG_AF_OD           0
+#define IOCFG_IPD             IO_CONFIG(GPIO_IN, 0, GPIO_PULLDOWN)
+#define IOCFG_IPU             IO_CONFIG(GPIO_IN, 0, GPIO_PULLUP)
+#define IOCFG_IN_FLOATING     IO_CONFIG(GPIO_IN, 0, 0)
+
+#define SPI_IO_CS_CFG           IO_CONFIG(GPIO_OUT, 0, 0)
+#define SPI_IO_CS_HIGH_CFG      IO_CONFIG(GPIO_IN, 0, GPIO_PULLUP)
+
+#define SERIAL_UART_FIRST_INDEX     0
+#define SERIAL_PIOUART_FIRST_INDEX  0
+
+// This MCU names its bus peripherals from zero (UART0, PIOUART0, SPI0, I2C0). Opt
+// the CLI `resource` command into hardware-instance ordinals so each index matches
+// the peripheral name: the bus peripherals here are 0-based (e.g. `resource
+// SERIAL_RX 1` is UART1), while logical resources (motor 1, servo 1) and sensors
+// (gyro 1) stay 1-based. See resourceDisplayBase() in cli.c.
+#define USE_RESOURCE_INDEX_FROM_ZERO
+
+extern uint32_t systemUniqueId[3];
+
+// PICOs have an 8 byte unique identifier.
+#define U_ID_0 (systemUniqueId[0])
+#define U_ID_1 (systemUniqueId[1])
+#define U_ID_2 (systemUniqueId[2])
+
+#define UART_TX_BUFFER_ATTRIBUTE
+#define UART_RX_BUFFER_ATTRIBUTE
+
+#define UART_TRAIT_BIDIR_PP_PREPEND 1
+#define SERIAL_TRAIT_PIN_CONFIG 1
+
+#define xDMA_GetCurrDataCounter(dma_resource) (((dma_channel_hw_t *)(dma_resource))->transfer_count)
+
+#define USE_LATE_TASK_STATISTICS
+
+#ifndef DEFAULT_VOLTAGE_METER_SCALE
+// 100 = 1.00x (100%) scaling; override per target/board to match its VBAT divider
+#define DEFAULT_VOLTAGE_METER_SCALE   100
+#endif
+
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+
+// NVIC priority utility macros
+#define NVIC_PRIORITY_GROUPING NVIC_PriorityGroup_2
+#define NVIC_BUILD_PRIORITY(base,sub) (((((base)<<(4-(7-(NVIC_PRIORITY_GROUPING>>8))))|((sub)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING>>8)))))<<4)&0xf0)
+#define NVIC_PRIORITY_BASE(prio) (((prio)>>(4-(7-(NVIC_PRIORITY_GROUPING>>8))))>>4)
+#define NVIC_PRIORITY_SUB(prio) (((prio)>>4)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING>>8))))
+
+#if OSD_FB_PICO_ENABLE_PIXEL_MODE
+// These pixel-based elements may be disabled in config
+
+#ifndef OSD_FB_ELEMENT_ENABLE_ARTIFICIAL_HORIZON
+#define OSD_FB_ELEMENT_ENABLE_ARTIFICIAL_HORIZON   1
+#endif
+
+#ifndef OSD_FB_ELEMENT_ENABLE_ALTITUDE
+#define OSD_FB_ELEMENT_ENABLE_ALTITUDE             1
+#endif
+
+#endif // OSD_FB_PICO_ENABLE_PIXEL_MODE
+
+#if OSD_FB_ENABLE_SMALLFONT
+
+#ifndef OSD_SMALLFONT_COLS
+#define OSD_SMALLFONT_COLS          46
+#endif
+
+#ifndef OSD_SMALLFONT_ROWS_PAL
+#define OSD_SMALLFONT_ROWS_PAL      24
+#endif
+
+#ifndef OSD_SMALLFONT_ROWS_NTSC
+#define OSD_SMALLFONT_ROWS_NTSC     19
+#endif
+
+#endif //  OSD_FB_ENABLE_SMALLFONT

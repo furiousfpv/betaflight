@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -29,59 +32,70 @@
 #include "common/maths.h"
 #include "common/utils.h"
 
-#include "drivers/nvic.h"
-
-#include "drivers/system.h"
-#include "drivers/io.h"
-#include "drivers/exti.h"
+#include "drivers/bus.h"
 #include "drivers/bus_i2c.h"
-
+#include "drivers/bus_spi.h"
+#include "drivers/exti.h"
+#include "drivers/io.h"
+#include "drivers/nvic.h"
 #include "drivers/sensor.h"
-#include "accgyro.h"
-#include "accgyro_mpu3050.h"
-#include "accgyro_mpu6050.h"
-#include "accgyro_mpu6500.h"
-#include "accgyro_spi_bmi160.h"
-#include "accgyro_spi_icm20689.h"
-#include "accgyro_spi_mpu6000.h"
-#include "accgyro_spi_mpu6500.h"
-#include "accgyro_spi_mpu9250.h"
-#include "accgyro_mpu.h"
+#include "drivers/system.h"
+#include "drivers/time.h"
 
+#include "drivers/accgyro/accgyro.h"
+#include "drivers/accgyro/accgyro_mpu6050.h"
+#include "drivers/accgyro/accgyro_mpu6500.h"
+#include "drivers/accgyro/accgyro_spi_bmi160.h"
+#include "drivers/accgyro/accgyro_spi_bmi270.h"
+#include "drivers/accgyro/accgyro_spi_bmi423.h"
+#include "drivers/accgyro/accgyro_spi_icm20649.h"
+#include "drivers/accgyro/accgyro_spi_icm20689.h"
+#include "drivers/accgyro/accgyro_spi_icm426xx.h"
+#include "drivers/accgyro/accgyro_spi_icm456xx.h"
+#include "drivers/accgyro/accgyro_spi_icm56686.h"
+#include "drivers/accgyro/accgyro_spi_lsm6dso.h"
+#include "drivers/accgyro/accgyro_spi_mpu6000.h"
+#include "drivers/accgyro/accgyro_spi_mpu6500.h"
+#include "drivers/accgyro/accgyro_spi_mpu9250.h"
+#include "drivers/accgyro/accgyro_spi_l3gd20.h"
+#include "drivers/accgyro/accgyro_spi_lsm6dsv16x.h"
+#include "drivers/accgyro/accgyro_mpu.h"
+#include "drivers/accgyro/accgyro_spi_icm40609.h"
 
-mpuResetFnPtr mpuResetFn;
-
-#ifndef MPU_I2C_INSTANCE
-#define MPU_I2C_INSTANCE I2C_DEVICE
-#endif
+#include "pg/pg.h"
+#include "pg/gyrodev.h"
 
 #ifndef MPU_ADDRESS
 #define MPU_ADDRESS             0x68
 #endif
 
-// WHO_AM_I register contents for MPU3050, 6050 and 6500
-#define MPU6500_WHO_AM_I_CONST              (0x70)
-#define MPUx0x0_WHO_AM_I_CONST              (0x68)
+// 1 MHz max SPI frequency during device detection
+#define MPU_MAX_SPI_DETECT_CLK_HZ 1000000
 
 #define MPU_INQUIRY_MASK   0x7E
 
+// Allow 100ms before attempting to access SPI bus
+#define GYRO_SPI_STARTUP_MS 100
+
+// Need to see at least this many interrupts during initialisation to confirm EXTI connectivity
+#define GYRO_EXTI_DETECT_THRESHOLD 1000
+
+// A DMA read takes a small fraction of a sample period, so one still in progress this many data ready
+// interrupts later has lost its completion and will never finish
+#define GYRO_DMA_STALL_LIMIT 4
+
+#ifdef USE_I2C_GYRO
 static void mpu6050FindRevision(gyroDev_t *gyro)
 {
-    bool ack;
-    UNUSED(ack);
-
-    uint8_t readBuffer[6];
-    uint8_t revision;
-    uint8_t productId;
-
     // There is a map of revision contained in the android source tree which is quite comprehensive and may help to understand this code
     // See https://android.googlesource.com/kernel/msm.git/+/eaf36994a3992b8f918c18e4f7411e8b2320a35f/drivers/misc/mpu6050/mldl_cfg.c
 
-    // determine product ID and accel revision
-    ack = gyro->mpuConfiguration.readFn(&gyro->bus, MPU_RA_XA_OFFS_H, 6, readBuffer);
-    revision = ((readBuffer[5] & 0x01) << 2) | ((readBuffer[3] & 0x01) << 1) | (readBuffer[1] & 0x01);
-    if (revision) {
-        /* Congrats, these parts are better. */
+    // determine product ID and revision
+    uint8_t readBuffer[6];
+    bool ack = busReadRegisterBuffer(&gyro->dev, MPU_RA_XA_OFFS_H, readBuffer, 6);
+    uint8_t revision = ((readBuffer[5] & 0x01) << 2) | ((readBuffer[3] & 0x01) << 1) | (readBuffer[1] & 0x01);
+    if (ack && revision) {
+        // Congrats, these parts are better
         if (revision == 1) {
             gyro->mpuDetectionResult.resolution = MPU_HALF_RESOLUTION;
         } else if (revision == 2) {
@@ -92,9 +106,10 @@ static void mpu6050FindRevision(gyroDev_t *gyro)
             failureMode(FAILURE_ACC_INCOMPATIBLE);
         }
     } else {
-        ack = gyro->mpuConfiguration.readFn(&gyro->bus, MPU_RA_PRODUCT_ID, 1, &productId);
+        uint8_t productId;
+        ack = busReadRegisterBuffer(&gyro->dev, MPU_RA_PRODUCT_ID, &productId, 1);
         revision = productId & 0x0F;
-        if (!revision) {
+        if (!ack || revision == 0) {
             failureMode(FAILURE_ACC_INCOMPATIBLE);
         } else if (revision == 4) {
             gyro->mpuDetectionResult.resolution = MPU_HALF_RESOLUTION;
@@ -103,34 +118,71 @@ static void mpu6050FindRevision(gyroDev_t *gyro)
         }
     }
 }
+#endif
 
 /*
  * Gyro interrupt service routine
  */
-#if defined(MPU_INT_EXTI)
+#ifdef USE_SPI_GYRO
+// Called in ISR context
+// Gyro read has just completed
+busStatus_e mpuIntCallback(uintptr_t arg)
+{
+    gyroDev_t *gyro = (gyroDev_t *)arg;
+    int32_t gyroDmaDuration = cmpTimeCycles(getCycleCounter(), gyro->gyroLastEXTI);
+
+    if (gyroDmaDuration > gyro->gyroDmaMaxDuration) {
+        gyro->gyroDmaMaxDuration = gyroDmaDuration;
+    }
+
+    gyro->dataReady = true;
+
+    return BUS_READY;
+}
+
+void mpuGyroStartDmaRead(gyroDev_t *gyro)
+{
+    if (gyro->dev.bus->curSegment == gyro->segments) {
+        if (++gyro->dmaStallCount < GYRO_DMA_STALL_LIMIT) {
+            return;
+        }
+        spiAbortTransfer(&gyro->dev);
+    }
+
+    gyro->dmaStallCount = 0;
+    spiSequence(&gyro->dev, gyro->segments);
+}
+
 static void mpuIntExtiHandler(extiCallbackRec_t *cb)
 {
-#ifdef DEBUG_MPU_DATA_READY_INTERRUPT
-    static uint32_t lastCalledAtUs = 0;
-    const uint32_t nowUs = micros();
-    debug[0] = (uint16_t)(nowUs - lastCalledAtUs);
-    lastCalledAtUs = nowUs;
-#endif
+    gyroDev_t *gyro = container_of(cb, gyroDev_t, exti);
+
+    // Ideally we'd use a timer to capture such information, but unfortunately the port used for EXTI interrupt does
+    // not have an associated timer
+    uint32_t nowCycles = getCycleCounter();
+    int32_t gyroLastPeriod = cmpTimeCycles(nowCycles, gyro->gyroLastEXTI);
+    // This detects the short (~79us) EXTI interval of an MPU6xxx gyro
+    if ((gyro->gyroShortPeriod == 0) || (gyroLastPeriod < gyro->gyroShortPeriod)) {
+        gyro->gyroSyncEXTI = gyro->gyroLastEXTI + gyro->gyroDmaMaxDuration;
+    }
+    gyro->gyroLastEXTI = nowCycles;
+
+    if (gyro->gyroModeSPI == GYRO_EXTI_INT_DMA) {
+        mpuGyroStartDmaRead(gyro);
+    }
+
+    gyro->detectedEXTI++;
+}
+#else
+static void mpuIntExtiHandler(extiCallbackRec_t *cb)
+{
     gyroDev_t *gyro = container_of(cb, gyroDev_t, exti);
     gyro->dataReady = true;
-    if (gyro->update) {
-        gyro->update(gyro);
-    }
-#ifdef DEBUG_MPU_DATA_READY_INTERRUPT
-    const uint32_t now2Us = micros();
-    debug[1] = (uint16_t)(now2Us - nowUs);
-#endif
 }
 #endif
 
 static void mpuIntExtiInit(gyroDev_t *gyro)
 {
-#if defined(MPU_INT_EXTI)
     if (gyro->mpuIntExtiTag == IO_TAG_NONE) {
         return;
     }
@@ -144,44 +196,17 @@ static void mpuIntExtiInit(gyroDev_t *gyro)
     }
 #endif
 
-#if defined (STM32F7)
-    IOInit(mpuIntIO, OWNER_MPU_EXTI, 0);
+    IOInit(mpuIntIO, OWNER_GYRO_EXTI, 0);
     EXTIHandlerInit(&gyro->exti, mpuIntExtiHandler);
-    EXTIConfig(mpuIntIO, &gyro->exti, NVIC_PRIO_MPU_INT_EXTI, IO_CONFIG(GPIO_MODE_INPUT,0,GPIO_NOPULL));   // TODO - maybe pullup / pulldown ?
-#else
-
-    IOInit(mpuIntIO, OWNER_MPU_EXTI, 0);
-    IOConfigGPIO(mpuIntIO, IOCFG_IN_FLOATING);   // TODO - maybe pullup / pulldown ?
-
-    EXTIHandlerInit(&gyro->exti, mpuIntExtiHandler);
-    EXTIConfig(mpuIntIO, &gyro->exti, NVIC_PRIO_MPU_INT_EXTI, EXTI_Trigger_Rising);
-    EXTIEnable(mpuIntIO, true);
-#endif
-
-#else
-    UNUSED(gyro);
-#endif
-}
-
-bool mpuReadRegisterI2C(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t* data)
-{
-    UNUSED(bus);
-    const bool ack = i2cRead(MPU_I2C_INSTANCE, MPU_ADDRESS, reg, length, data);
-    return ack;
-}
-
-bool mpuWriteRegisterI2C(const busDevice_t *bus, uint8_t reg, uint8_t data)
-{
-    UNUSED(bus);
-    const bool ack = i2cWrite(MPU_I2C_INSTANCE, MPU_ADDRESS, reg, data);
-    return ack;
+    EXTIConfig(mpuIntIO, &gyro->exti, NVIC_PRIO_MPU_INT_EXTI, IOCFG_IN_FLOATING, BETAFLIGHT_EXTI_TRIGGER_RISING);
+    EXTIEnable(mpuIntIO);
 }
 
 bool mpuAccRead(accDev_t *acc)
 {
     uint8_t data[6];
 
-    const bool ack = acc->mpuConfiguration.readFn(&acc->bus, MPU_RA_ACCEL_XOUT_H, 6, data);
+    const bool ack = busReadRegisterBuffer(&acc->gyro->dev, acc->gyro->accDataReg, data, 6);
     if (!ack) {
         return false;
     }
@@ -193,18 +218,11 @@ bool mpuAccRead(accDev_t *acc)
     return true;
 }
 
-void mpuGyroSetIsrUpdate(gyroDev_t *gyro, sensorGyroUpdateFuncPtr updateFn)
-{
-    ATOMIC_BLOCK(NVIC_PRIO_MPU_INT_EXTI) {
-        gyro->update = updateFn;
-    }
-}
-
 bool mpuGyroRead(gyroDev_t *gyro)
 {
     uint8_t data[6];
 
-    const bool ack = gyro->mpuConfiguration.readFn(&gyro->bus, gyro->mpuConfiguration.gyroReadXRegister, 6, data);
+    const bool ack = busReadRegisterBuffer(&gyro->dev, gyro->gyroDataReg, data, 6);
     if (!ack) {
         return false;
     }
@@ -216,130 +234,349 @@ bool mpuGyroRead(gyroDev_t *gyro)
     return true;
 }
 
-bool mpuCheckDataReady(gyroDev_t* gyro)
+#ifdef USE_SPI_GYRO
+bool mpuAccReadSPI(accDev_t *acc)
 {
-    bool ret;
-    if (gyro->dataReady) {
-        ret = true;
-        gyro->dataReady= false;
-    } else {
-        ret = false;
+    switch (acc->gyro->gyroModeSPI) {
+    case GYRO_EXTI_INT:
+    case GYRO_EXTI_NO_INT:
+    {
+        acc->gyro->dev.txBuf[0] = acc->gyro->accDataReg | 0x80;
+
+        busSegment_t segments[] = {
+                {.u.buffers = {NULL, NULL}, 7, true, NULL},
+                {.u.link = {NULL, NULL}, 0, true, NULL},
+        };
+        segments[0].u.buffers.txData = acc->gyro->dev.txBuf;
+        segments[0].u.buffers.rxData = &acc->gyro->dev.rxBuf[1];
+
+        spiSequence(&acc->gyro->dev, &segments[0]);
+
+        // Wait for completion
+        spiWait(&acc->gyro->dev);
+
+        // Non-DMA read starts at accDataReg, so data is always at index 1
+        int16_t *accData = (int16_t *)(void *)acc->gyro->dev.rxBuf;
+        acc->ADCRaw[X] = __builtin_bswap16(accData[1]);
+        acc->ADCRaw[Y] = __builtin_bswap16(accData[2]);
+        acc->ADCRaw[Z] = __builtin_bswap16(accData[3]);
+        break;
     }
-    return ret;
+
+    case GYRO_EXTI_INT_DMA:
+    {
+        // If read was triggered in interrupt don't bother waiting. The worst that could happen is that we pick
+        // up an old value.
+
+        // This data was read from the gyro, which is the same SPI device as the acc
+        // Acc data may not start at index 1 if DMA read starts before acc registers (e.g. at temp register)
+        const uint8_t accDataIndex = ((acc->gyro->accDataReg - acc->gyro->dmaReadRegStart) >> 1) + 1;
+        int16_t *accData = (int16_t *)(void *)acc->gyro->dev.rxBuf;
+        acc->ADCRaw[X] = __builtin_bswap16(accData[accDataIndex]);
+        acc->ADCRaw[Y] = __builtin_bswap16(accData[accDataIndex + 1]);
+        acc->ADCRaw[Z] = __builtin_bswap16(accData[accDataIndex + 2]);
+        break;
+    }
+
+    case GYRO_EXTI_INIT:
+    default:
+        break;
+    }
+
+    return true;
 }
 
-#ifdef USE_SPI
-static bool detectSPISensorsAndUpdateDetectionResult(gyroDev_t *gyro)
+bool mpuGyroReadSPI(gyroDev_t *gyro)
 {
-    UNUSED(gyro); // since there are FCs which have gyro on I2C but other devices on SPI
-#ifdef USE_GYRO_SPI_MPU6000
-#ifdef MPU6000_CS_PIN
-    gyro->bus.spi.csnPin = gyro->bus.spi.csnPin == IO_NONE ? IOGetByTag(IO_TAG(MPU6000_CS_PIN)) : gyro->bus.spi.csnPin;
-#endif
-    if (mpu6000SpiDetect(&gyro->bus)) {
-        gyro->mpuDetectionResult.sensor = MPU_60x0_SPI;
-        gyro->mpuConfiguration.gyroReadXRegister = MPU_RA_GYRO_XOUT_H;
-        gyro->mpuConfiguration.readFn = mpu6000SpiReadRegister;
-        gyro->mpuConfiguration.writeFn = mpu6000SpiWriteRegister;
-        return true;
-    }
-#endif
+    int16_t *gyroData = (int16_t *)(void *)gyro->dev.rxBuf;
+    switch (gyro->gyroModeSPI) {
+    case GYRO_EXTI_INIT:
+    {
+        // Initialise the tx buffer to all 0xff
+        memset(gyro->dev.txBuf, 0xff, 16);
 
-#ifdef USE_GYRO_SPI_MPU6500
-    gyro->bus.spi.csnPin = gyro->bus.spi.csnPin == IO_NONE ? IOGetByTag(IO_TAG(MPU6500_CS_PIN)) : gyro->bus.spi.csnPin;
-    const uint8_t mpu6500Sensor = mpu6500SpiDetect(&gyro->bus);
-    // some targets using MPU_9250_SPI, ICM_20608_SPI or ICM_20602_SPI state sensor is MPU_65xx_SPI
-    if (mpu6500Sensor != MPU_NONE) {
-        gyro->mpuDetectionResult.sensor = mpu6500Sensor;
-        gyro->mpuConfiguration.gyroReadXRegister = MPU_RA_GYRO_XOUT_H;
-        gyro->mpuConfiguration.readFn = mpu6500SpiReadRegister;
-        gyro->mpuConfiguration.writeFn = mpu6500SpiWriteRegister;
-        return true;
-    }
-#endif
+        // Check that minimum number of interrupts have been detected
 
-#ifdef  USE_GYRO_SPI_MPU9250
-    gyro->bus.spi.csnPin = gyro->bus.spi.csnPin == IO_NONE ? IOGetByTag(IO_TAG(MPU9250_CS_PIN)) : gyro->bus.spi.csnPin;
-    if (mpu9250SpiDetect(&gyro->bus)) {
-        gyro->mpuDetectionResult.sensor = MPU_9250_SPI;
-        gyro->mpuConfiguration.gyroReadXRegister = MPU_RA_GYRO_XOUT_H;
-        gyro->mpuConfiguration.readFn = mpu9250SpiReadRegister;
-        gyro->mpuConfiguration.slowreadFn = mpu9250SpiSlowReadRegister;
-        gyro->mpuConfiguration.verifywriteFn = verifympu9250SpiWriteRegister;
-        gyro->mpuConfiguration.writeFn = mpu9250SpiWriteRegister;
-        gyro->mpuConfiguration.resetFn = mpu9250SpiResetGyro;
-        return true;
-    }
+        // We need some offset from the gyro interrupts to ensure sampling after the interrupt
+        gyro->gyroDmaMaxDuration = 5;
+        if (gyro->detectedEXTI > GYRO_EXTI_DETECT_THRESHOLD) {
+#ifdef USE_DMA
+            if (spiUseDMA(&gyro->dev)) {
+                gyro->dev.callbackArg = (uintptr_t)gyro;
+                gyro->dev.txBuf[0] = gyro->dmaReadRegStart | 0x80;
+                gyro->segments[0].len = gyro->gyroDataReg - gyro->dmaReadRegStart + sizeof(uint8_t) + 3 * sizeof(int16_t);  // assumes gyros come last
+                gyro->segments[0].callback = mpuIntCallback;
+                gyro->segments[0].u.buffers.txData = gyro->dev.txBuf;
+                gyro->segments[0].u.buffers.rxData = &gyro->dev.rxBuf[1];
+                gyro->segments[0].negateCS = true;
+                gyro->gyroModeSPI = GYRO_EXTI_INT_DMA;
+            } else
 #endif
+            {
+                // Interrupts are present, but no DMA
+                gyro->gyroModeSPI = GYRO_EXTI_INT;
+            }
+        } else {
+            gyro->gyroModeSPI = GYRO_EXTI_NO_INT;
+        }
+        break;
+    }
 
+    case GYRO_EXTI_INT:
+    case GYRO_EXTI_NO_INT:
+    {
+        gyro->dev.txBuf[0] = gyro->gyroDataReg | 0x80;
+
+        busSegment_t segments[] = {
+                {.u.buffers = {NULL, NULL}, 7, true, NULL},
+                {.u.link = {NULL, NULL}, 0, true, NULL},
+        };
+        segments[0].u.buffers.txData = gyro->dev.txBuf;
+        segments[0].u.buffers.rxData = &gyro->dev.rxBuf[1];
+
+        spiSequence(&gyro->dev, &segments[0]);
+
+        // Wait for completion
+        spiWait(&gyro->dev);
+
+        gyro->gyroADCRaw[X] = __builtin_bswap16(gyroData[1]);
+        gyro->gyroADCRaw[Y] = __builtin_bswap16(gyroData[2]);
+        gyro->gyroADCRaw[Z] = __builtin_bswap16(gyroData[3]);
+        break;
+    }
+
+    case GYRO_EXTI_INT_DMA:
+    {
+        // Acc and gyro data may not be continuous (MPU6xxx has temperature in between)
+        const uint8_t gyroDataIndex = ((gyro->gyroDataReg - gyro->dmaReadRegStart) >> 1) + 1;
+        const uint8_t tempDataIndex = ((gyro->tempDataReg - gyro->dmaReadRegStart) >> 1) + 1;
+
+        // If read was triggered in interrupt don't bother waiting. The worst that could happen is that we pick
+        // up an old value.
+        gyro->gyroADCRaw[X] = __builtin_bswap16(gyroData[gyroDataIndex]);
+        gyro->gyroADCRaw[Y] = __builtin_bswap16(gyroData[gyroDataIndex + 1]);
+        gyro->gyroADCRaw[Z] = __builtin_bswap16(gyroData[gyroDataIndex + 2]);
+        // temperature was read as well, so populate it
+        gyro->temperature = (int16_t)(((int16_t)__builtin_bswap16(gyroData[tempDataIndex])) * gyro->tempScale + gyro->tempZero);
+        break;
+    }
+
+    default:
+        break;
+    }
+
+    return true;
+}
+
+typedef uint8_t (*gyroSpiDetectFn_t)(const extDevice_t *dev);
+
+static gyroSpiDetectFn_t gyroSpiDetectFnTable[] = {
+#if defined(USE_ACCGYRO_LSM6DSV16X) || defined(USE_ACCGYRO_LSM6DSV32X)
+    lsm6dsv16xSpiDetect,
+#endif
+#ifdef USE_ACCGYRO_LSM6DSK320X
+    lsm6dsk320xSpiDetect,
+#endif
 #ifdef USE_GYRO_SPI_ICM20689
-    gyro->bus.spi.csnPin = gyro->bus.spi.csnPin == IO_NONE ? IOGetByTag(IO_TAG(ICM20689_CS_PIN)) : gyro->bus.spi.csnPin;
-    if (icm20689SpiDetect(&gyro->bus)) {
-        gyro->mpuDetectionResult.sensor = ICM_20689_SPI;
-        gyro->mpuConfiguration.gyroReadXRegister = MPU_RA_GYRO_XOUT_H;
-        gyro->mpuConfiguration.readFn = icm20689SpiReadRegister;
-        gyro->mpuConfiguration.writeFn = icm20689SpiWriteRegister;
-        return true;
-    }
+    icm20689SpiDetect,  // icm20689SpiDetect detects ICM20602 and ICM20689
 #endif
-
+#ifdef USE_GYRO_SPI_MPU6000
+    mpu6000SpiDetect,
+#endif
+#ifdef USE_GYRO_SPI_MPU6500
+    mpu6500SpiDetect,   // some targets using MPU_9250_SPI, ICM_20608_SPI or ICM_20602_SPI state sensor is MPU_65xx_SPI
+#endif
+#ifdef  USE_GYRO_SPI_MPU9250
+    mpu9250SpiDetect,
+#endif
+#ifdef USE_ACCGYRO_LSM6DSO
+    lsm6dsoDetect,
+#endif
 #ifdef USE_ACCGYRO_BMI160
-    gyro->bus.spi.csnPin = gyro->bus.spi.csnPin == IO_NONE ? IOGetByTag(IO_TAG(BMI160_CS_PIN)) : gyro->bus.spi.csnPin;
-    if (bmi160Detect(&gyro->bus)) {
-        gyro->mpuDetectionResult.sensor = BMI_160_SPI;
-        gyro->mpuConfiguration.readFn = bmi160SpiReadRegister;
-        gyro->mpuConfiguration.writeFn = bmi160SpiWriteRegister;
-        return true;
-    }
+    bmi160Detect,
 #endif
+#ifdef USE_ACCGYRO_BMI270
+    bmi270Detect,
+#endif
+#ifdef USE_ACCGYRO_BMI423
+    bmi423Detect,
+#endif
+#if defined(USE_GYRO_SPI_ICM42605) || defined(USE_ACCGYRO_ICM42622P) || defined(USE_ACCGYRO_ICM42686P) || defined(USE_GYRO_SPI_ICM42688P) || defined(USE_ACCGYRO_IIM42652) || defined(USE_ACCGYRO_IIM42653)
+    icm426xxSpiDetect,
+#endif
+#ifdef USE_GYRO_SPI_ICM20649
+    icm20649SpiDetect,
+#endif
+#if defined(USE_ACCGYRO_ICM45686) || defined(USE_ACCGYRO_ICM45605)
+    icm456xxSpiDetect,
+#endif
+#ifdef USE_ACCGYRO_ICM56686
+    icm56686SpiDetect,
+#endif
+#ifdef USE_GYRO_L3GD20
+    l3gd20Detect,
+#endif
+#ifdef USE_ACCGYRO_ICM40609D
+    icm40609SpiDetect,
+#endif
+    NULL // Avoid an empty array
+};
 
+static bool detectSPISensorsAndUpdateDetectionResult(gyroDev_t *gyro, const gyroDeviceConfig_t *config)
+{
+    if (!config->csnTag || !spiSetBusInstance(&gyro->dev, config->spiBus)) {
+        return false;
+    }
+
+    gyro->dev.busType_u.spi.csnPin = IOGetByTag(config->csnTag);
+
+    IOInit(gyro->dev.busType_u.spi.csnPin, OWNER_GYRO_CS, RESOURCE_INDEX(config->index));
+    IOConfigGPIO(gyro->dev.busType_u.spi.csnPin, SPI_IO_CS_CFG);
+    IOHi(gyro->dev.busType_u.spi.csnPin); // Ensure device is disabled, important when two devices are on the same bus.
+
+    // Allow 100ms before attempting to access gyro's SPI bus
+    // Do this once here rather than in each detection routine to speed boot
+    while (millis() < GYRO_SPI_STARTUP_MS);
+
+    // Set a slow SPI clock that all potential devices can handle during gyro detection
+    spiSetClkDivisor(&gyro->dev, spiCalculateDivider(MPU_MAX_SPI_DETECT_CLK_HZ));
+
+    // It is hard to use hardware to optimize the detection loop here,
+    // as hardware type and detection function name doesn't match.
+    // May need a bitmap of hardware to detection function to do it right?
+
+    for (size_t index = 0 ; gyroSpiDetectFnTable[index] ; index++) {
+        uint8_t sensor = (gyroSpiDetectFnTable[index])(&gyro->dev);
+        if (sensor != MPU_NONE) {
+            gyro->mpuDetectionResult.sensor = sensor;
+            busDeviceRegister(&gyro->dev);
+            return true;
+        }
+    }
+
+    // Detection failed, disable CS pin again
+    ioPreinitByIO(gyro->dev.busType_u.spi.csnPin, IOCFG_IPU, PREINIT_PIN_STATE_HIGH);
     return false;
 }
 #endif
 
-void mpuDetect(gyroDev_t *gyro)
+void mpuPreInit(const struct gyroDeviceConfig_s *config)
 {
+#ifdef USE_SPI_GYRO
+    ioPreinitByTag(config->csnTag, IOCFG_IPU, PREINIT_PIN_STATE_HIGH);
+#else
+    UNUSED(config);
+#endif
+}
+
+bool mpuDetect(gyroDev_t *gyro, const gyroDeviceConfig_t *config)
+{
+    static busDevice_t bus;
+    gyro->dev.bus = &bus;
+
     // MPU datasheet specifies 30ms.
     delay(35);
 
-    uint8_t sig = 0;
-#ifdef USE_I2C
-    bool ack = mpuReadRegisterI2C(&gyro->bus, MPU_RA_WHO_AM_I, 1, &sig);
-#else
-    bool ack = false;
-#endif
-    if (ack) {
-        gyro->mpuConfiguration.readFn = mpuReadRegisterI2C;
-        gyro->mpuConfiguration.writeFn = mpuWriteRegisterI2C;
+    if (config->busType == BUS_TYPE_NONE) {
+        return false;
+    }
+
+    if (config->busType == BUS_TYPE_GYRO_AUTO) {
+        gyro->dev.bus->busType = BUS_TYPE_I2C;
     } else {
-#ifdef USE_SPI
-        detectSPISensorsAndUpdateDetectionResult(gyro);
+        gyro->dev.bus->busType = config->busType;
+    }
+
+#ifdef USE_I2C_GYRO
+    if (gyro->dev.bus->busType == BUS_TYPE_I2C) {
+        gyro->dev.bus->busType_u.i2c.device = I2C_CFG_TO_DEV(config->i2cBus);
+        gyro->dev.busType_u.i2c.address = config->i2cAddress ? config->i2cAddress : MPU_ADDRESS;
+
+        uint8_t sig = 0;
+        bool ack = busReadRegisterBuffer(&gyro->dev, MPU_RA_WHO_AM_I, &sig, 1);
+
+        if (ack) {
+            busDeviceRegister(&gyro->dev);
+            uint8_t inquiryResult;
+            ack = busReadRegisterBuffer(&gyro->dev, MPU_RA_WHO_AM_I_LEGACY, &inquiryResult, 1);
+            inquiryResult &= MPU_INQUIRY_MASK;
+            if (ack && inquiryResult == MPUx0x0_WHO_AM_I_CONST) {
+                gyro->mpuDetectionResult.sensor = MPU_3050;
+                return true;
+            }
+
+            sig &= MPU_INQUIRY_MASK;
+            if (sig == MPUx0x0_WHO_AM_I_CONST) {
+                gyro->mpuDetectionResult.sensor = MPU_60x0;
+                mpu6050FindRevision(gyro);
+            } else if (sig == MPU6500_WHO_AM_I_CONST) {
+                gyro->mpuDetectionResult.sensor = MPU_65xx_I2C;
+            }
+            return true;
+        }
+    }
 #endif
-        return;
-    }
 
-    gyro->mpuConfiguration.gyroReadXRegister = MPU_RA_GYRO_XOUT_H;
-
-    // If an MPU3050 is connected sig will contain 0.
-    uint8_t inquiryResult;
-    ack = mpuReadRegisterI2C(&gyro->bus, MPU_RA_WHO_AM_I_LEGACY, 1, &inquiryResult);
-    inquiryResult &= MPU_INQUIRY_MASK;
-    if (ack && inquiryResult == MPUx0x0_WHO_AM_I_CONST) {
-        gyro->mpuDetectionResult.sensor = MPU_3050;
-        gyro->mpuConfiguration.gyroReadXRegister = MPU3050_GYRO_OUT;
-        return;
-    }
-
-    sig &= MPU_INQUIRY_MASK;
-    if (sig == MPUx0x0_WHO_AM_I_CONST) {
-        gyro->mpuDetectionResult.sensor = MPU_60x0;
-        mpu6050FindRevision(gyro);
-    } else if (sig == MPU6500_WHO_AM_I_CONST) {
-        gyro->mpuDetectionResult.sensor = MPU_65xx_I2C;
-    }
+#ifdef USE_SPI_GYRO
+    gyro->dev.bus->busType = BUS_TYPE_SPI;
+    return detectSPISensorsAndUpdateDetectionResult(gyro, config);
+#else
+    return false;
+#endif
 }
 
 void mpuGyroInit(gyroDev_t *gyro)
 {
+    // Initialise both segments of gyro->segments.
+    // Gyro code only sets the first segment. The second segment stays as
+    // an end segment with negateCS false, which enforces DMA whenever possible.
+    busSegment_t nullSegment = {.u.link = {NULL, NULL}, 0, false, NULL};
+    gyro->segments[0] = nullSegment;
+    gyro->segments[1] = nullSegment;
+    gyro->accDataReg = MPU_RA_ACCEL_XOUT_H;
+    gyro->gyroDataReg = MPU_RA_GYRO_XOUT_H;
+    gyro->tempDataReg = MPU_RA_TEMP_OUT_H;
+    gyro->dmaReadRegStart = gyro->accDataReg;
     mpuIntExtiInit(gyro);
 }
+
+uint8_t mpuGyroDLPF(gyroDev_t *gyro)
+{
+    uint8_t ret = 0;
+
+    // If gyro is in 32KHz mode then the DLPF bits aren't used
+    if (gyro->gyroRateKHz <= GYRO_RATE_8_kHz) {
+        switch (gyro->hardware_lpf) {
+#ifdef USE_GYRO_DLPF_EXPERIMENTAL
+            case GYRO_HARDWARE_LPF_EXPERIMENTAL:
+                // experimental mode not supported for MPU60x0 family
+                if ((gyro->gyroHardware != GYRO_MPU6050) && (gyro->gyroHardware != GYRO_MPU6000)) {
+                    ret = 7;
+                } else {
+                    ret = 0;
+                }
+                break;
+#endif
+
+            case GYRO_HARDWARE_LPF_NORMAL:
+            default:
+                ret = 0;
+                break;
+        }
+    }
+    return ret;
+}
+
+#ifdef USE_GYRO_REGISTER_DUMP
+uint8_t mpuGyroReadRegister(const extDevice_t *dev, uint8_t reg)
+{
+    uint8_t data;
+    const bool ack = busReadRegisterBuffer(dev, reg, &data, 1);
+    if (ack) {
+        return data;
+    } else {
+        return 0;
+    }
+
+}
+#endif

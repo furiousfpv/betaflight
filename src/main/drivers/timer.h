@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
@@ -20,51 +23,34 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "drivers/dma.h"
 #include "drivers/io_types.h"
-#include "rcc_types.h"
+#include "drivers/timer_types.h"
+
+#if PLATFORM_TRAIT_RCC
+#include "platform/rcc_types.h"
+#endif
+
+#include "drivers/resource.h"
+
+#ifdef USE_TIMER
+#include "timer_def.h"
+#endif
+
+#include "pg/timerio.h"
+
+#define CC_CHANNELS_PER_TIMER         4 // TIM_Channel_1..4
+#ifndef CC_CHANNEL_FROM_INDEX
+#define CC_CHANNEL_FROM_INDEX(x)      ((uint16_t)(x) << 2)
+#define CC_INDEX_FROM_CHANNEL(x)      ((uint8_t)((x) >> 2))
+#endif
+
+#define TIM_CH_TO_SELCHANNEL(ch)  ((ch - 1) * 2)
+#define TIM_N(n) (1 << (n))
+#define TIMER_INDEX(i) BITCOUNT((TIM_N(i) - 1) & USED_TIMERS)
 
 typedef uint16_t captureCompare_t;        // 16 bit on both 103 and 303, just register access must be 32bit sometimes (use timCCR_t)
 
-#if defined(STM32F4)
-typedef uint32_t timCCR_t;
-typedef uint32_t timCCER_t;
-typedef uint32_t timSR_t;
-typedef uint32_t timCNT_t;
-#elif defined(STM32F7)
-typedef uint32_t timCCR_t;
-typedef uint32_t timCCER_t;
-typedef uint32_t timSR_t;
-typedef uint32_t timCNT_t;
-#elif defined(STM32F3)
-typedef uint32_t timCCR_t;
-typedef uint32_t timCCER_t;
-typedef uint32_t timSR_t;
-typedef uint32_t timCNT_t;
-#elif defined(STM32F1)
-typedef uint16_t timCCR_t;
-typedef uint16_t timCCER_t;
-typedef uint16_t timSR_t;
-typedef uint16_t timCNT_t;
-#elif defined(UNIT_TEST) || defined(SIMULATOR_BUILD)
-typedef uint32_t timCCR_t;
-typedef uint32_t timCCER_t;
-typedef uint32_t timSR_t;
-typedef uint32_t timCNT_t;
-#else
-#error "Unknown CPU defined"
-#endif
-
-typedef enum {
-    TIM_USE_ANY           = 0x0,
-    TIM_USE_NONE          = 0x0,
-    TIM_USE_PPM           = 0x1,
-    TIM_USE_PWM           = 0x2,
-    TIM_USE_MOTOR         = 0x4,
-    TIM_USE_SERVO         = 0x8,
-    TIM_USE_LED           = 0x10,
-    TIM_USE_TRANSPONDER   = 0x20,
-    TIM_USE_BEEPER        = 0x40
-} timerUsageFlag_e;
 
 // use different types from capture and overflow - multiple overflow handlers are implemented as linked list
 struct timerCCHandlerRec_s;
@@ -74,68 +60,46 @@ typedef void timerOvrHandlerCallback(struct timerOvrHandlerRec_s* self, uint16_t
 
 typedef struct timerCCHandlerRec_s {
     timerCCHandlerCallback* fn;
-} timerCCHandlerRec_t;
+} timerEdgeHandlerRec_t;
 
 typedef struct timerOvrHandlerRec_s {
     timerOvrHandlerCallback* fn;
     struct timerOvrHandlerRec_s* next;
 } timerOvrHandlerRec_t;
 
-typedef struct timerDef_s {
-    TIM_TypeDef *TIMx;
-    rccPeriphTag_t rcc;
-    uint8_t inputIrq;
-} timerDef_t;
-
 typedef struct timerHardware_s {
-    TIM_TypeDef *tim;
+    timerResource_t *tim;
     ioTag_t tag;
     uint8_t channel;
-    timerUsageFlag_e usageFlags;
     uint8_t output;
-#if defined(STM32F3) || defined(STM32F4) || defined(STM32F7)
     uint8_t alternateFunction;
-#endif
-#if defined(USE_DSHOT) || defined(LED_STRIP) || defined(TRANSPONDER)
-#if defined(STM32F4) || defined(STM32F7)
-    DMA_Stream_TypeDef *dmaRef;
-    uint32_t dmaChannel;
-#elif defined(STM32F3) || defined(STM32F1)
-    DMA_Channel_TypeDef *dmaRef;
-#endif
-    uint8_t dmaIrqHandler;
+
+#if defined(USE_TIMER_DMA)
+#if defined(USE_DMA_SPEC)
+    dmaResource_t *dmaRefConfigured;
+    uint32_t dmaChannelConfigured;
+#else // USE_DMA_SPEC
+    dmaResource_t *dmaRef;
+    uint32_t dmaChannel; // XXX Can be much smaller (e.g. uint8_t)
+#endif // USE_DMA_SPEC
+    dmaResource_t *dmaTimUPRef;
+    uint32_t dmaTimUPChannel;
+    uint8_t dmaTimUPIrqHandler;
 #endif
 } timerHardware_t;
 
 typedef enum {
-    TIMER_OUTPUT_NONE      = 0x00,
-    TIMER_INPUT_ENABLED    = 0x01, /* TODO: remove this */
-    TIMER_OUTPUT_ENABLED   = 0x01, /* TODO: remove this */
-    TIMER_OUTPUT_STANDARD  = 0x01,
-    TIMER_OUTPUT_INVERTED  = 0x02,
-    TIMER_OUTPUT_N_CHANNEL = 0x04
+    TIMER_OUTPUT_NONE      = 0,
+    TIMER_OUTPUT_INVERTED  = (1 << 0),
+    TIMER_OUTPUT_N_CHANNEL = (1 << 1),
 } timerFlag_e;
 
-#ifdef STM32F1
-#if defined(STM32F10X_XL) || defined(STM32F10X_HD_VL)
-#define HARDWARE_TIMER_DEFINITION_COUNT 14
-#elif defined(STM32F10X_HD) || defined(STM32F10X_CL)
-#define HARDWARE_TIMER_DEFINITION_COUNT 7
-#else
-#define HARDWARE_TIMER_DEFINITION_COUNT 4
-#endif
-#elif defined(STM32F3)
-#define HARDWARE_TIMER_DEFINITION_COUNT 10
-#elif defined(STM32F411xE)
-#define HARDWARE_TIMER_DEFINITION_COUNT 10
-#elif defined(STM32F4)
-#define HARDWARE_TIMER_DEFINITION_COUNT 14
-#elif defined(STM32F7)
-#define HARDWARE_TIMER_DEFINITION_COUNT 14
-#endif
+#define MHZ_TO_HZ(x) ((x) * 1000000)
 
-extern const timerHardware_t timerHardware[];
-extern const timerDef_t timerDefinitions[];
+extern const timerHardware_t fullTimerHardware[];
+
+#define TIMER_CHANNEL_COUNT FULL_TIMER_CHANNEL_COUNT
+#define TIMER_HARDWARE fullTimerHardware
 
 typedef enum {
     TYPE_FREE,
@@ -155,49 +119,73 @@ typedef enum {
     TYPE_TIMER
 } channelType_t;
 
-void timerConfigure(const timerHardware_t *timHw, uint16_t period, uint8_t mhz);  // This interface should be replaced.
+//
+// Legacy API
+//
+void timerConfigure(const timerHardware_t *timHw, uint16_t period, uint32_t hz);
 
-void timerChConfigIC(const timerHardware_t *timHw, bool polarityRising, unsigned inputFilterSamples);
-void timerChConfigICDual(const timerHardware_t* timHw, bool polarityRising, unsigned inputFilterSamples);
-void timerChICPolarity(const timerHardware_t *timHw, bool polarityRising);
-volatile timCCR_t* timerChCCR(const timerHardware_t* timHw);
-volatile timCCR_t* timerChCCRLo(const timerHardware_t* timHw);
-volatile timCCR_t* timerChCCRHi(const timerHardware_t* timHw);
-void timerChConfigOC(const timerHardware_t* timHw, bool outEnable, bool stateHigh);
-void timerChConfigGPIO(const timerHardware_t* timHw, ioConfig_t mode);
+//
+// Initialisation
+//
+void timerInit(void);
 
-void timerChCCHandlerInit(timerCCHandlerRec_t *self, timerCCHandlerCallback *fn);
-void timerChOvrHandlerInit(timerOvrHandlerRec_t *self, timerOvrHandlerCallback *fn);
-void timerChConfigCallbacks(const timerHardware_t *channel, timerCCHandlerRec_t *edgeCallback, timerOvrHandlerRec_t *overflowCallback);
-void timerChConfigCallbacksDual(const timerHardware_t *channel, timerCCHandlerRec_t *edgeCallbackLo, timerCCHandlerRec_t *edgeCallbackHi, timerOvrHandlerRec_t *overflowCallback);
-void timerChITConfigDualLo(const timerHardware_t* timHw, FunctionalState newState);
-void timerChITConfig(const timerHardware_t* timHw, FunctionalState newState);
-void timerChClearCCFlag(const timerHardware_t* timHw);
+//
+// per-timer
+//
+
+// once-upon-a-time all the timers were started on boot, now they are started when needed.
+void timerStart(const timerHardware_t *timHw);
+
+//
+// per-channel
+//
+
+void timerChannelConfigInput(const timerHardware_t *timHw, bool polarityRising, unsigned inputFilterSamples);
+void timerChannelConfigInputDual(const timerHardware_t* timHw, bool polarityRising, unsigned inputFilterSamples);
+void timerChannelInputPolarity(const timerHardware_t *timHw, bool polarityRising);
+void timerChannelConfigOutput(const timerHardware_t* timHw, bool outEnable, bool stateHigh);
+void timerChannelConfigGPIO(const timerHardware_t* timHw, ioConfig_t mode);
+
+void timerChannelEdgeHandlerInit(timerEdgeHandlerRec_t *self, timerCCHandlerCallback *fn);
+void timerChannelOverflowHandlerInit(timerOvrHandlerRec_t *self, timerOvrHandlerCallback *fn);
+void timerChannelConfigCallbacks(const timerHardware_t *channel, timerEdgeHandlerRec_t *edgeCallback, timerOvrHandlerRec_t *overflowCallback);
+void timerChannelConfigInterrupt(const timerHardware_t* timHw, FunctionalState newState);
+void timerChannelClearFlag(const timerHardware_t *timHw);
 
 void timerChInit(const timerHardware_t *timHw, channelType_t type, int irqPriority, uint8_t irq);
 
-void timerInit(void);
-void timerStart(void);
-void timerForceOverflow(TIM_TypeDef *tim);
+//
+// per-timer
+//
 
-uint8_t timerClockDivisor(TIM_TypeDef *tim);
+void timerConfigUpdateCallback(const timerHardware_t *timHw, timerOvrHandlerRec_t *updateCallback);
 
-void configTimeBase(TIM_TypeDef *tim, uint16_t period, uint8_t mhz);  // TODO - just for migration
+uint32_t timerClock(const timerHardware_t *timHw);
 
-rccPeriphTag_t timerRCC(TIM_TypeDef *tim);
-uint8_t timerInputIrq(TIM_TypeDef *tim);
+void timerReconfigureTimeBase(const timerHardware_t *timHw, uint16_t period, uint32_t hz);
 
-const timerHardware_t *timerGetByTag(ioTag_t tag, timerUsageFlag_e flag);
+uint8_t timerInputInterrupt(const timerHardware_t *timHw);
 
-#if defined(USE_HAL_DRIVER)
-TIM_HandleTypeDef* timerFindTimerHandle(TIM_TypeDef *tim);
-#else
-void timerOCInit(TIM_TypeDef *tim, uint8_t channel, TIM_OCInitTypeDef *init);
-void timerOCPreloadConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t preload);
+#if defined(USE_TIMER_MGMT)
+struct timerIOConfig_s;
+
+struct timerIOConfig_s *timerIoConfigByTag(ioTag_t ioTag);
+const timerHardware_t *timerGetAllocatedByNumberAndChannel(int8_t timerNumber, uint16_t timerChannel);
+const resourceOwner_t *timerGetOwner(const timerHardware_t *timer);
 #endif
+const timerHardware_t *timerGetConfiguredByTag(ioTag_t ioTag);
+const timerHardware_t *timerAllocate(ioTag_t ioTag, resourceOwner_e owner, uint8_t resourceIndex);
+const timerHardware_t *timerGetByTagAndIndex(ioTag_t ioTag, unsigned timerIndex);
 
-volatile timCCR_t *timerCCR(TIM_TypeDef *tim, uint8_t channel);
-uint16_t timerDmaSource(uint8_t channel);
+int8_t timerGetNumberByIndex(uint8_t index);
+int8_t timerGetIndexByNumber(uint8_t number);
+int8_t timerGetTIMNumber(const timerHardware_t *timHw);
 
-uint16_t timerGetPrescalerByDesiredMhz(TIM_TypeDef *tim, uint16_t mhz);
-uint16_t timerGetPeriodByPrescaler(TIM_TypeDef *tim, uint16_t prescaler, uint32_t hertz);
+void timerReset(const timerHardware_t *timHw);
+void timerSetPeriod(const timerHardware_t *timHw, uint32_t period);
+uint32_t timerGetPeriod(const timerHardware_t *timHw);
+void timerSetCounter(const timerHardware_t *timHw, uint32_t counter);
+void timerDisable(const timerHardware_t *timHw);
+void timerEnable(const timerHardware_t *timHw);
+void timerEnableInterrupt(const timerHardware_t *timHw);
+uint32_t timerGetPrescaler(const timerHardware_t *timHw);

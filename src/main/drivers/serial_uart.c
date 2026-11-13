@@ -1,358 +1,435 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
  * Authors:
+ * jflyper - Refactoring, cleanup and made pin-configurable
  * Dominic Clifton - Serial port abstraction, Separation of common STM32 code for cleanflight, various cleanups.
  * Hamasaki/Timecop - Initial baseflight code
 */
+
 #include <stdbool.h>
 #include <stdint.h>
+#include <string.h>
 
 #include "platform.h"
 
+#ifdef USE_UART
+
 #include "build/build_config.h"
 
+#include <common/maths.h>
 #include "common/utils.h"
-#include "drivers/gpio.h"
-#include "inverter.h"
 
-#include "serial.h"
-#include "serial_uart.h"
-#include "serial_uart_impl.h"
+#include "io/serial.h"
 
-static void usartConfigurePinInversion(uartPort_t *uartPort) {
-#if !defined(USE_INVERTER) && !defined(STM32F303xC)
-    UNUSED(uartPort);
-#else
-    bool inverted = uartPort->port.options & SERIAL_INVERTED;
+#include "drivers/dma.h"
+#include "drivers/dma_reqmap.h"
+#include "drivers/serial.h"
+#include "drivers/serial_impl.h"
+#include "drivers/serial_uart.h"
+#include "drivers/serial_uart_impl.h"
 
-#ifdef USE_INVERTER
-    if (inverted) {
-        // Enable hardware inverter if available.
-        enableInverter(uartPort->USARTx, true);
-    }
+#include "pg/serial_uart.h"
+
+#if !defined(UART_TX_BUFFER_ATTRIBUTE) || !defined(UART_RX_BUFFER_ATTRIBUTE)
+#error Undefined UART_{TX,RX}_BUFFER_ATTRIBUTE for this MCU
 #endif
 
-#ifdef STM32F303xC
-    uint32_t inversionPins = 0;
+#define UART_BUFFERS(n)                                         \
+    UART_BUFFER(UART_TX_BUFFER_ATTRIBUTE, n, T);                \
+    UART_BUFFER(UART_RX_BUFFER_ATTRIBUTE, n, R); struct dummy_s \
+/**/
 
-    if (uartPort->port.mode & MODE_TX) {
-        inversionPins |= USART_InvPin_Tx;
-    }
-    if (uartPort->port.mode & MODE_RX) {
-        inversionPins |= USART_InvPin_Rx;
-    }
-
-    USART_InvPinCmd(uartPort->USARTx, inversionPins, inverted ? ENABLE : DISABLE);
+#ifdef USE_UART0
+UART_BUFFERS(0);
 #endif
-#endif
-}
 
-static void uartReconfigure(uartPort_t *uartPort)
-{
-    USART_InitTypeDef USART_InitStructure;
-    USART_Cmd(uartPort->USARTx, DISABLE);
-
-    USART_InitStructure.USART_BaudRate = uartPort->port.baudRate;
-
-    // according to the stm32 documentation wordlen has to be 9 for parity bits
-    // this does not seem to matter for rx but will give bad data on tx!
-    if (uartPort->port.options & SERIAL_PARITY_EVEN) {
-        USART_InitStructure.USART_WordLength = USART_WordLength_9b;
-    } else {
-        USART_InitStructure.USART_WordLength = USART_WordLength_8b;
-    }
-
-    USART_InitStructure.USART_StopBits = (uartPort->port.options & SERIAL_STOPBITS_2) ? USART_StopBits_2 : USART_StopBits_1;
-    USART_InitStructure.USART_Parity   = (uartPort->port.options & SERIAL_PARITY_EVEN) ? USART_Parity_Even : USART_Parity_No;
-
-    USART_InitStructure.USART_HardwareFlowControl = USART_HardwareFlowControl_None;
-    USART_InitStructure.USART_Mode = 0;
-    if (uartPort->port.mode & MODE_RX)
-        USART_InitStructure.USART_Mode |= USART_Mode_Rx;
-    if (uartPort->port.mode & MODE_TX)
-        USART_InitStructure.USART_Mode |= USART_Mode_Tx;
-
-    USART_Init(uartPort->USARTx, &USART_InitStructure);
-
-    usartConfigurePinInversion(uartPort);
-
-    if(uartPort->port.options & SERIAL_BIDIR)
-        USART_HalfDuplexCmd(uartPort->USARTx, ENABLE);
-    else
-        USART_HalfDuplexCmd(uartPort->USARTx, DISABLE);
-
-    USART_Cmd(uartPort->USARTx, ENABLE);
-}
-
-serialPort_t *uartOpen(USART_TypeDef *USARTx, serialReceiveCallbackPtr rxCallback, uint32_t baudRate, portMode_t mode, portOptions_t options)
-{
-    uartPort_t *s = NULL;
-
-    if (false) {
 #ifdef USE_UART1
-    } else if (USARTx == USART1) {
-        s = serialUART1(baudRate, mode, options);
+UART_BUFFERS(1);
+#endif
 
+#ifdef USE_UART2
+UART_BUFFERS(2);
+#endif
+
+#ifdef USE_UART3
+UART_BUFFERS(3);
+#endif
+
+#ifdef USE_UART4
+UART_BUFFERS(4);
+#endif
+
+#ifdef USE_UART5
+UART_BUFFERS(5);
+#endif
+
+#ifdef USE_UART6
+UART_BUFFERS(6);
+#endif
+
+#ifdef USE_UART7
+UART_BUFFERS(7);
+#endif
+
+#ifdef USE_UART8
+UART_BUFFERS(8);
+#endif
+
+#ifdef USE_UART9
+UART_BUFFERS(9);
+#endif
+
+#ifdef USE_UART10
+UART_BUFFERS(10);
+#endif
+
+#ifdef USE_UART11
+UART_BUFFERS(11);
+#endif
+
+#ifdef USE_UART12
+UART_BUFFERS(12);
+#endif
+
+#ifdef USE_UART13
+UART_BUFFERS(13);
+#endif
+
+#ifdef USE_UART14
+UART_BUFFERS(14);
+#endif
+
+#ifdef USE_UART15
+UART_BUFFERS(15);
+#endif
+
+#ifdef USE_LPUART1
+UART_BUFFERS(Lp1);  // TODO - maybe some other naming scheme ?
+#endif
+
+#ifdef USE_PIOUART0
+UART_BUFFERS(Pio0); // -> uartPio0RxBuffer etc.
+#endif
+
+#ifdef USE_PIOUART1
+UART_BUFFERS(Pio1);
+#endif
+
+#ifdef USE_PIOUART2
+UART_BUFFERS(Pio2);
+#endif
+
+#ifdef USE_PIOUART3
+UART_BUFFERS(Pio3);
+#endif
+
+#ifdef USE_PIOUART4
+UART_BUFFERS(Pio4);
+#endif
+
+#ifdef USE_PIOUART5
+UART_BUFFERS(Pio5);
+#endif
+
+#ifdef USE_PIOUART6
+UART_BUFFERS(Pio6);
+#endif
+
+#ifdef USE_PIOUART7
+UART_BUFFERS(Pio7);
+#endif
+
+#ifdef USE_PIOUART8
+UART_BUFFERS(Pio8);
+#endif
+
+#ifdef USE_PIOUART9
+UART_BUFFERS(Pio9);
+#endif
+
+#undef UART_BUFFERS
+
+// store only devices configured for target (USE_UARTx)
+// some entries may be unused, for example because of pin configuration
+// uartDeviceIdx_e is direct index into this table
+FAST_DATA_ZERO_INIT uartDevice_t uartDevice[UARTDEV_COUNT];
+
+// map serialPortIdentifier_e to uartDeviceIdx_e
+uartDeviceIdx_e uartDeviceIdxFromIdentifier(serialPortIdentifier_e identifier)
+{
+#ifdef USE_LPUART1
+    if (identifier == SERIAL_PORT_LPUART1) {
+        return UARTDEV_LP1;
+    }
+#endif
+
+#if 1 // TODO ...
+    // store +1 in table - unset values default to 0
+    // table is for UART only to save space (LPUART is handled separately)
+#define _R(id, dev) [id] = (dev) + 1
+    static const uartDeviceIdx_e uartMap[] = {
+#ifdef USE_UART0
+        _R(SERIAL_PORT_UART0, UARTDEV_0),
+#endif
+#ifdef USE_UART1
+        _R(SERIAL_PORT_USART1, UARTDEV_1),
 #endif
 #ifdef USE_UART2
-    } else if (USARTx == USART2) {
-        s = serialUART2(baudRate, mode, options);
+        _R(SERIAL_PORT_USART2, UARTDEV_2),
 #endif
 #ifdef USE_UART3
-    } else if (USARTx == USART3) {
-        s = serialUART3(baudRate, mode, options);
+        _R(SERIAL_PORT_USART3, UARTDEV_3),
 #endif
 #ifdef USE_UART4
-    } else if (USARTx == UART4) {
-        s = serialUART4(baudRate, mode, options);
+        _R(SERIAL_PORT_UART4, UARTDEV_4),
 #endif
 #ifdef USE_UART5
-    } else if (USARTx == UART5) {
-        s = serialUART5(baudRate, mode, options);
+        _R(SERIAL_PORT_UART5, UARTDEV_5),
 #endif
 #ifdef USE_UART6
-    } else if (USARTx == USART6) {
-        s = serialUART6(baudRate, mode, options);
+        _R(SERIAL_PORT_USART6, UARTDEV_6),
 #endif
-
-    } else {
-        return (serialPort_t *)s;
+#ifdef USE_UART7
+        _R(SERIAL_PORT_USART7, UARTDEV_7),
+#endif
+#ifdef USE_UART8
+        _R(SERIAL_PORT_USART8, UARTDEV_8),
+#endif
+#ifdef USE_UART9
+        _R(SERIAL_PORT_UART9, UARTDEV_9),
+#endif
+#ifdef USE_UART10
+        _R(SERIAL_PORT_USART10, UARTDEV_10),
+#endif
+#ifdef USE_UART11
+        _R(SERIAL_PORT_UART11, UARTDEV_11),
+#endif
+#ifdef USE_UART12
+        _R(SERIAL_PORT_UART12, UARTDEV_12),
+#endif
+#ifdef USE_UART13
+        _R(SERIAL_PORT_UART13, UARTDEV_13),
+#endif
+#ifdef USE_UART14
+        _R(SERIAL_PORT_UART14, UARTDEV_14),
+#endif
+#ifdef USE_UART15
+        _R(SERIAL_PORT_UART15, UARTDEV_15),
+#endif
+    };
+#undef _R
+    if (identifier >= 0 && identifier < (int)ARRAYLEN(uartMap)) {
+        // UART case, but given USE_UARTx may not be defined
+        return uartMap[identifier] ? uartMap[identifier] - 1 : UARTDEV_INVALID;
     }
-    s->txDMAEmpty = true;
-
-    // common serial initialisation code should move to serialPort::init()
-    s->port.rxBufferHead = s->port.rxBufferTail = 0;
-    s->port.txBufferHead = s->port.txBufferTail = 0;
-    // callback works for IRQ-based RX ONLY
-    s->port.rxCallback = rxCallback;
-    s->port.mode = mode;
-    s->port.baudRate = baudRate;
-    s->port.options = options;
-
-    uartReconfigure(s);
-
-    // Receive DMA or IRQ
-    DMA_InitTypeDef DMA_InitStructure;
-    if (mode & MODE_RX) {
-#ifdef STM32F4
-        if (s->rxDMAStream) {
-            DMA_StructInit(&DMA_InitStructure);
-            DMA_InitStructure.DMA_PeripheralBaseAddr = s->rxDMAPeripheralBaseAddr;
-            DMA_InitStructure.DMA_Priority = DMA_Priority_Medium;
-            DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-            DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-            DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-            DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
-            DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Disable ;
-            DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_1QuarterFull ;
-            DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single ;
-            DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;
 #else
-        if (s->rxDMAChannel) {
-            DMA_StructInit(&DMA_InitStructure);
-            DMA_InitStructure.DMA_PeripheralBaseAddr = s->rxDMAPeripheralBaseAddr;
-            DMA_InitStructure.DMA_Priority = DMA_Priority_Medium;
-            DMA_InitStructure.DMA_M2M = DMA_M2M_Disable;
-            DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-            DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-            DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-            DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
-#endif
-            DMA_InitStructure.DMA_BufferSize = s->port.rxBufferSize;
-
-#ifdef STM32F4
-            DMA_InitStructure.DMA_Channel = s->rxDMAChannel;
-            DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralToMemory;
-            DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
-            DMA_InitStructure.DMA_Memory0BaseAddr = (uint32_t)s->port.rxBuffer;
-            DMA_DeInit(s->rxDMAStream);
-            DMA_Init(s->rxDMAStream, &DMA_InitStructure);
-            DMA_Cmd(s->rxDMAStream, ENABLE);
-            USART_DMACmd(s->USARTx, USART_DMAReq_Rx, ENABLE);
-            s->rxDMAPos = DMA_GetCurrDataCounter(s->rxDMAStream);
-#else
-            DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralSRC;
-            DMA_InitStructure.DMA_Mode = DMA_Mode_Circular;
-            DMA_InitStructure.DMA_MemoryBaseAddr = (uint32_t)s->port.rxBuffer;
-            DMA_DeInit(s->rxDMAChannel);
-            DMA_Init(s->rxDMAChannel, &DMA_InitStructure);
-            DMA_Cmd(s->rxDMAChannel, ENABLE);
-            USART_DMACmd(s->USARTx, USART_DMAReq_Rx, ENABLE);
-            s->rxDMAPos = DMA_GetCurrDataCounter(s->rxDMAChannel);
-#endif
-        } else {
-            USART_ClearITPendingBit(s->USARTx, USART_IT_RXNE);
-            USART_ITConfig(s->USARTx, USART_IT_RXNE, ENABLE);
+    {
+        const int idx = identifier - SERIAL_PORT_UART_FIRST;
+        if (idx >= 0 && idx < SERIAL_UART_MAX) {
+            if (BIT(idx) & SERIAL_UART_MASK) {
+                // return number of enabled UART ports smaller than idx
+                return popcount((BIT(idx) - 1) & SERIAL_UART_MASK);
+            } else {
+                return UARTDEV_INVALID;
+            }
         }
     }
-
-    // Transmit DMA or IRQ
-    if (mode & MODE_TX) {
-#ifdef STM32F4
-        if (s->txDMAStream) {
-            DMA_StructInit(&DMA_InitStructure);
-            DMA_InitStructure.DMA_PeripheralBaseAddr = s->txDMAPeripheralBaseAddr;
-            DMA_InitStructure.DMA_Priority = DMA_Priority_Medium;
-            DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-            DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-            DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-            DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
-            DMA_InitStructure.DMA_FIFOMode = DMA_FIFOMode_Disable ;
-            DMA_InitStructure.DMA_FIFOThreshold = DMA_FIFOThreshold_1QuarterFull ;
-            DMA_InitStructure.DMA_MemoryBurst = DMA_MemoryBurst_Single ;
-            DMA_InitStructure.DMA_PeripheralBurst = DMA_PeripheralBurst_Single;
-#else
-        if (s->txDMAChannel) {
-            DMA_StructInit(&DMA_InitStructure);
-            DMA_InitStructure.DMA_PeripheralBaseAddr = s->txDMAPeripheralBaseAddr;
-            DMA_InitStructure.DMA_Priority = DMA_Priority_Medium;
-            DMA_InitStructure.DMA_M2M = DMA_M2M_Disable;
-            DMA_InitStructure.DMA_PeripheralInc = DMA_PeripheralInc_Disable;
-            DMA_InitStructure.DMA_PeripheralDataSize = DMA_PeripheralDataSize_Byte;
-            DMA_InitStructure.DMA_MemoryInc = DMA_MemoryInc_Enable;
-            DMA_InitStructure.DMA_MemoryDataSize = DMA_MemoryDataSize_Byte;
 #endif
-            DMA_InitStructure.DMA_BufferSize = s->port.txBufferSize;
-
-#ifdef STM32F4
-            DMA_InitStructure.DMA_Channel = s->txDMAChannel;
-            DMA_InitStructure.DMA_DIR = DMA_DIR_MemoryToPeripheral;
-            DMA_InitStructure.DMA_Mode = DMA_Mode_Normal;
-            DMA_DeInit(s->txDMAStream);
-            DMA_Init(s->txDMAStream, &DMA_InitStructure);
-            DMA_ITConfig(s->txDMAStream, DMA_IT_TC | DMA_IT_FE | DMA_IT_TE | DMA_IT_DME, ENABLE);
-            DMA_SetCurrDataCounter(s->txDMAStream, 0);
-#else
-            DMA_InitStructure.DMA_DIR = DMA_DIR_PeripheralDST;
-            DMA_InitStructure.DMA_Mode = DMA_Mode_Normal;
-            DMA_DeInit(s->txDMAChannel);
-            DMA_Init(s->txDMAChannel, &DMA_InitStructure);
-            DMA_ITConfig(s->txDMAChannel, DMA_IT_TC, ENABLE);
-            DMA_SetCurrDataCounter(s->txDMAChannel, 0);
-            s->txDMAChannel->CNDTR = 0;
-#endif
-            USART_DMACmd(s->USARTx, USART_DMAReq_Tx, ENABLE);
-        } else {
-            USART_ITConfig(s->USARTx, USART_IT_TXE, ENABLE);
-        }
-    }
-
-    USART_Cmd(s->USARTx, ENABLE);
-
-    return (serialPort_t *)s;
+    // neither LPUART nor UART
+    return UARTDEV_INVALID;
 }
 
-void uartSetBaudRate(serialPort_t *instance, uint32_t baudRate)
+int uartDeviceIndexFromIdentifier(serialPortIdentifier_e identifier)
+{
+    return (int)uartDeviceIdxFromIdentifier(identifier);
+}
+
+#if SERIAL_PIOUART_COUNT > 0
+FAST_DATA_ZERO_INIT uartDevice_t pioUartDevice[SERIAL_PIOUART_COUNT];
+#endif
+
+uartDevice_t *pioUartDeviceFromIdentifier(serialPortIdentifier_e identifier)
+{
+    // PIOUART devices must be used in order continuously from PIOUART0 (i.e. USE_PIOUART0 then USE_PIOUART1 ...)
+#if SERIAL_PIOUART_COUNT > 0
+    int offset = identifier - SERIAL_PORT_PIOUART_FIRST;
+    if (offset >= 0 && offset < SERIAL_PIOUART_COUNT) {
+        return &pioUartDevice[offset];
+    }
+#else
+    UNUSED(identifier);
+#endif
+
+    return NULL;
+}
+
+uartDevice_t *uartDeviceFromIdentifier(serialPortIdentifier_e identifier)
+{
+    if (serialType(identifier) == SERIALTYPE_PIOUART) {
+        return pioUartDeviceFromIdentifier(identifier);
+    }
+
+    const uartDeviceIdx_e deviceIdx = uartDeviceIdxFromIdentifier(identifier);
+    return deviceIdx != UARTDEV_INVALID ? &uartDevice[deviceIdx] : NULL;
+}
+
+static portMode_e uartSanitizeMode(const uartDevice_t *uartDevice, portMode_e mode, portOptions_e options)
+{
+    if (!uartDevice->tx.pin) {
+        mode &= ~MODE_TX;
+    }
+
+    if (!uartDevice->rx.pin && !((options & SERIAL_BIDIR) && uartDevice->tx.pin)) {
+        mode &= ~MODE_RX;
+    }
+
+    return mode;
+}
+
+static bool uartCanWrite(const uartPort_t *uartPort)
+{
+    const uartDevice_t *uartDevice = container_of(uartPort, uartDevice_t, port);
+    return (uartPort->port.mode & MODE_TX) && uartDevice->tx.pin;
+}
+
+serialPort_t *uartOpen(serialPortIdentifier_e identifier, serialReceiveCallbackPtr rxCallback, void *rxCallbackData, uint32_t baudRate, portMode_e mode, portOptions_e options)
+{
+    uartDevice_t *uartDevice = uartDeviceFromIdentifier(identifier);
+    if (!uartDevice) {
+        return NULL;
+    }
+    // A UART can be compiled in (USE_UARTx) yet have no usable pins for the
+    // configured port - e.g. a config assigns a pin that is missing from the
+    // hardware table. uartPinConfigure() then leaves ->hardware NULL, and
+    // serialUART() would dereference it and hard fault. Bail out cleanly.
+    if (!uartDevice->hardware) {
+        return NULL;
+    }
+    // fill identifier early, so initialization code can use it
+    uartDevice->port.port.identifier = identifier;
+    mode = uartSanitizeMode(uartDevice, mode, options);
+
+    uartPort_t *uartPort = serialUART(uartDevice, baudRate, mode, options);
+    if (!uartPort) {
+        return NULL;
+    }
+
+    // common serial initialisation code should move to serialPort::init()
+    uartPort->port.rxBufferHead = uartPort->port.rxBufferTail = 0;
+    uartPort->port.txBufferHead = uartPort->port.txBufferTail = 0;
+    // callback works for IRQ-based RX ONLY
+    uartPort->port.rxCallback = rxCallback;
+    uartPort->port.rxCallbackData = rxCallbackData;
+    uartPort->port.mode = mode;
+    uartPort->port.baudRate = baudRate;
+    uartPort->port.options = options;
+
+    uartReconfigure(uartPort);
+
+    return (serialPort_t *)uartPort;
+}
+
+static void uartSetBaudRate(serialPort_t *instance, uint32_t baudRate)
 {
     uartPort_t *uartPort = (uartPort_t *)instance;
+    uartDevice_t *uartDevice = container_of(uartPort, uartDevice_t, port);
+    uartPort->port.mode = uartSanitizeMode(uartDevice, uartPort->port.mode, uartPort->port.options);
     uartPort->port.baudRate = baudRate;
     uartReconfigure(uartPort);
 }
 
-void uartSetMode(serialPort_t *instance, portMode_t mode)
+static void uartSetMode(serialPort_t *instance, portMode_e mode)
 {
     uartPort_t *uartPort = (uartPort_t *)instance;
-    uartPort->port.mode = mode;
+    uartDevice_t *uartDevice = container_of(uartPort, uartDevice_t, port);
+    uartPort->port.mode = uartSanitizeMode(uartDevice, mode, uartPort->port.options);
     uartReconfigure(uartPort);
 }
 
-void uartStartTxDMA(uartPort_t *s)
+static uint32_t uartTotalRxBytesWaiting(const serialPort_t *instance)
 {
-#ifdef STM32F4
-    DMA_Cmd(s->txDMAStream, DISABLE);
-    DMA_MemoryTargetConfig(s->txDMAStream, (uint32_t)&s->port.txBuffer[s->port.txBufferTail], DMA_Memory_0);
-    //s->txDMAStream->M0AR = (uint32_t)&s->port.txBuffer[s->port.txBufferTail];
-    if (s->port.txBufferHead > s->port.txBufferTail) {
-        s->txDMAStream->NDTR = s->port.txBufferHead - s->port.txBufferTail;
-        s->port.txBufferTail = s->port.txBufferHead;
-    }
-    else {
-        s->txDMAStream->NDTR = s->port.txBufferSize - s->port.txBufferTail;
-        s->port.txBufferTail = 0;
-    }
-    s->txDMAEmpty = false;
-    DMA_Cmd(s->txDMAStream, ENABLE);
-#else
-    s->txDMAChannel->CMAR = (uint32_t)&s->port.txBuffer[s->port.txBufferTail];
-    if (s->port.txBufferHead > s->port.txBufferTail) {
-        s->txDMAChannel->CNDTR = s->port.txBufferHead - s->port.txBufferTail;
-        s->port.txBufferTail = s->port.txBufferHead;
-    } else {
-        s->txDMAChannel->CNDTR = s->port.txBufferSize - s->port.txBufferTail;
-        s->port.txBufferTail = 0;
-    }
-    s->txDMAEmpty = false;
-    DMA_Cmd(s->txDMAChannel, ENABLE);
-#endif
-}
+    const uartPort_t *uartPort = (const uartPort_t*)instance;
 
-uint32_t uartTotalRxBytesWaiting(const serialPort_t *instance)
-{
-    const uartPort_t *s = (const uartPort_t*)instance;
-#ifdef STM32F4
-    if (s->rxDMAStream) {
-        uint32_t rxDMAHead = s->rxDMAStream->NDTR;
-#else
-    if (s->rxDMAChannel) {
-        uint32_t rxDMAHead = s->rxDMAChannel->CNDTR;
-#endif
-        if (rxDMAHead >= s->rxDMAPos) {
-            return rxDMAHead - s->rxDMAPos;
+#ifdef USE_DMA
+    if (uartPort->rxDMAResource) {
+        uint32_t rxDMAHead = dmaGetDataLength(uartPort->rxDMAResource);
+
+        // uartPort->rxDMAPos and rxDMAHead represent distances from the end
+        // of the buffer.  They count DOWN as they advance.
+        if (uartPort->rxDMAPos >= rxDMAHead) {
+            return uartPort->rxDMAPos - rxDMAHead;
         } else {
-            return s->port.rxBufferSize + rxDMAHead - s->rxDMAPos;
+            return uartPort->port.rxBufferSize + uartPort->rxDMAPos - rxDMAHead;
         }
     }
+#endif
 
-    if (s->port.rxBufferHead >= s->port.rxBufferTail) {
-        return s->port.rxBufferHead - s->port.rxBufferTail;
+    // The Rx ISR advances the head; read it once so a wrap between reads cannot underflow the result
+    const uint32_t rxBufferHead = uartPort->port.rxBufferHead;
+    const uint32_t rxBufferTail = uartPort->port.rxBufferTail;
+
+    if (rxBufferHead >= rxBufferTail) {
+        return rxBufferHead - rxBufferTail;
     } else {
-        return s->port.rxBufferSize + s->port.rxBufferHead - s->port.rxBufferTail;
+        return uartPort->port.rxBufferSize + rxBufferHead - rxBufferTail;
     }
 }
 
-uint32_t uartTotalTxBytesFree(const serialPort_t *instance)
+static uint32_t uartTotalTxBytesFree(const serialPort_t *instance)
 {
-    const uartPort_t *s = (const uartPort_t*)instance;
+    const uartPort_t *uartPort = (const uartPort_t*)instance;
 
+    uint32_t txBufferHead;
+    uint32_t txBufferTail;
     uint32_t bytesUsed;
+#ifdef USE_DMA
+    uint32_t dmaRemaining = 0;
+#endif
 
-    if (s->port.txBufferHead >= s->port.txBufferTail) {
-        bytesUsed = s->port.txBufferHead - s->port.txBufferTail;
+    // The Tx ISR moves the tail whenever it starts a transfer; retry until the tail did not move during the sample
+    do {
+        txBufferTail = uartPort->port.txBufferTail;
+        txBufferHead = uartPort->port.txBufferHead;
+#ifdef USE_DMA
+        if (uartPort->txDMAResource) {
+            dmaRemaining = dmaGetDataLength(uartPort->txDMAResource);
+        }
+#endif
+    } while (txBufferTail != uartPort->port.txBufferTail);
+
+    if (txBufferHead >= txBufferTail) {
+        bytesUsed = txBufferHead - txBufferTail;
     } else {
-        bytesUsed = s->port.txBufferSize + s->port.txBufferHead - s->port.txBufferTail;
+        bytesUsed = uartPort->port.txBufferSize + txBufferHead - txBufferTail;
     }
 
-#ifdef STM32F4
-    if (s->txDMAStream) {
+#ifdef USE_DMA
+    if (uartPort->txDMAResource) {
         /*
          * When we queue up a DMA request, we advance the Tx buffer tail before the transfer finishes, so we must add
          * the remaining size of that in-progress transfer here instead:
          */
-        bytesUsed += s->txDMAStream->NDTR;
-#else
-    if (s->txDMAChannel) {
-        /*
-         * When we queue up a DMA request, we advance the Tx buffer tail before the transfer finishes, so we must add
-         * the remaining size of that in-progress transfer here instead:
-         */
-        bytesUsed += s->txDMAChannel->CNDTR;
-#endif
+        bytesUsed += dmaRemaining;
+
         /*
          * If the Tx buffer is being written to very quickly, we might have advanced the head into the buffer
          * space occupied by the current DMA transfer. In that case the "bytesUsed" total will actually end up larger
@@ -361,72 +438,152 @@ uint32_t uartTotalTxBytesFree(const serialPort_t *instance)
          *
          * Be kind to callers and pretend like our buffer can only ever be 100% full.
          */
-        if (bytesUsed >= s->port.txBufferSize - 1) {
+        if (bytesUsed >= uartPort->port.txBufferSize - 1) {
             return 0;
         }
     }
-
-    return (s->port.txBufferSize - 1) - bytesUsed;
-}
-
-bool isUartTransmitBufferEmpty(const serialPort_t *instance)
-{
-    const uartPort_t *s = (const uartPort_t *)instance;
-#ifdef STM32F4
-    if (s->txDMAStream)
-#else
-    if (s->txDMAChannel)
 #endif
-        return s->txDMAEmpty;
-    else
-        return s->port.txBufferTail == s->port.txBufferHead;
+
+    return (uartPort->port.txBufferSize - 1) - bytesUsed;
 }
 
-uint8_t uartRead(serialPort_t *instance)
+static bool isUartTransmitBufferEmpty(const serialPort_t *instance)
+{
+    const uartPort_t *uartPort = (const uartPort_t *)instance;
+#ifdef USE_DMA
+    if (uartPort->txDMAResource) {
+        return uartPort->txDMAEmpty;
+    } else
+#endif
+    {
+        return uartPort->port.txBufferTail == uartPort->port.txBufferHead;
+    }
+}
+
+static uint8_t uartRead(serialPort_t *instance)
 {
     uint8_t ch;
-    uartPort_t *s = (uartPort_t *)instance;
+    uartPort_t *uartPort = (uartPort_t *)instance;
 
-#ifdef STM32F4
-    if (s->rxDMAStream) {
-#else
-    if (s->rxDMAChannel) {
+#ifdef USE_DMA
+    if (uartPort->rxDMAResource) {
+        ch = uartPort->port.rxBuffer[uartPort->port.rxBufferSize - uartPort->rxDMAPos];
+        if (--uartPort->rxDMAPos == 0)
+            uartPort->rxDMAPos = uartPort->port.rxBufferSize;
+    } else
 #endif
-        ch = s->port.rxBuffer[s->port.rxBufferSize - s->rxDMAPos];
-        if (--s->rxDMAPos == 0)
-            s->rxDMAPos = s->port.rxBufferSize;
-    } else {
-        ch = s->port.rxBuffer[s->port.rxBufferTail];
-        if (s->port.rxBufferTail + 1 >= s->port.rxBufferSize) {
-            s->port.rxBufferTail = 0;
+    {
+        ch = uartPort->port.rxBuffer[uartPort->port.rxBufferTail];
+        if (uartPort->port.rxBufferTail + 1 >= uartPort->port.rxBufferSize) {
+            uartPort->port.rxBufferTail = 0;
         } else {
-            s->port.rxBufferTail++;
+            uartPort->port.rxBufferTail++;
         }
     }
 
     return ch;
 }
 
-void uartWrite(serialPort_t *instance, uint8_t ch)
+static void uartWrite(serialPort_t *instance, uint8_t ch)
 {
-    uartPort_t *s = (uartPort_t *)instance;
-    s->port.txBuffer[s->port.txBufferHead] = ch;
-    if (s->port.txBufferHead + 1 >= s->port.txBufferSize) {
-        s->port.txBufferHead = 0;
-    } else {
-        s->port.txBufferHead++;
+    uartPort_t *uartPort = (uartPort_t *)instance;
+
+    if (!uartCanWrite(uartPort)) {
+        return;
     }
 
-#ifdef STM32F4
-    if (s->txDMAStream) {
-        if (!(s->txDMAStream->CR & 1))
-#else
-    if (s->txDMAChannel) {
-        if (!(s->txDMAChannel->CCR & 1))
-#endif
-            uartStartTxDMA(s);
+    // Check if the TX line is being pulled low by an unpowered peripheral
+    if (uartPort->checkUsartTxOutput && !uartPort->checkUsartTxOutput(uartPort)) {
+        // TX line is being pulled low, so don't transmit
+        return;
+    }
+
+    uartPort->port.txBuffer[uartPort->port.txBufferHead] = ch;
+
+    if (uartPort->port.txBufferHead + 1 >= uartPort->port.txBufferSize) {
+        uartPort->port.txBufferHead = 0;
     } else {
-        USART_ITConfig(s->USARTx, USART_IT_TXE, ENABLE);
+        uartPort->port.txBufferHead++;
+    }
+
+#ifdef USE_DMA
+    if (uartPort->txDMAResource) {
+        uartTryStartTxDMA(uartPort);
+    } else
+#endif
+    {
+        uartEnableTxInterrupt(uartPort);
+    }
+}
+
+static void uartBeginWrite(serialPort_t *instance)
+{
+    uartPort_t *uartPort = (uartPort_t *)instance;
+
+    if (!uartCanWrite(uartPort)) {
+        return;
+    }
+
+    // Check if the TX line is being pulled low by an unpowered peripheral
+    if (uartPort->checkUsartTxOutput) {
+        uartPort->checkUsartTxOutput(uartPort);
+    }
+}
+
+static void uartWriteBuf(serialPort_t *instance, const void *data, int count)
+{
+    uartPort_t *uartPort = (uartPort_t *)instance;
+    uartDevice_t *uart = container_of(uartPort, uartDevice_t, port);
+    const uint8_t *bytePtr = (const uint8_t*)data;
+
+    if (!uartCanWrite(uartPort)) {
+        return;
+    }
+
+    // Test if checkUsartTxOutput() detected TX line being pulled low by an unpowered peripheral
+    if (uart->txPinState == TX_PIN_MONITOR) {
+        // TX line is being pulled low, so don't transmit
+        return;
+    }
+
+    while (count > 0) {
+        // Calculate the available space to the end of the buffer
+        const int spaceToEnd = uartPort->port.txBufferSize - uartPort->port.txBufferHead;
+        // Determine the amount to copy in this iteration
+        const int chunkSize = MIN(spaceToEnd, count);
+        // Copy the chunk
+        memcpy((void *)&uartPort->port.txBuffer[uartPort->port.txBufferHead], bytePtr, chunkSize);
+        // Advance source pointer
+        bytePtr += chunkSize;
+        // Advance head, wrapping if necessary
+        uartPort->port.txBufferHead = (uartPort->port.txBufferHead + chunkSize) % uartPort->port.txBufferSize;
+        // Decrease remaining count
+        count -= chunkSize;
+    }
+}
+
+static void uartEndWrite(serialPort_t *instance)
+{
+    uartPort_t *uartPort = (uartPort_t *)instance;
+    uartDevice_t *uart = container_of(uartPort, uartDevice_t, port);
+
+    if (!uartCanWrite(uartPort)) {
+        return;
+    }
+
+    // Check if the TX line is being pulled low by an unpowered peripheral
+    if (uart->txPinState == TX_PIN_MONITOR) {
+        // TX line is being pulled low, so don't transmit
+        return;
+    }
+
+#ifdef USE_DMA
+    if (uartPort->txDMAResource) {
+        uartTryStartTxDMA(uartPort);
+    } else
+#endif
+    {
+        uartEnableTxInterrupt(uartPort);
     }
 }
 
@@ -439,8 +596,100 @@ const struct serialPortVTable uartVTable[] = {
         .serialSetBaudRate = uartSetBaudRate,
         .isSerialTransmitBufferEmpty = isUartTransmitBufferEmpty,
         .setMode = uartSetMode,
-        .writeBuf = NULL,
-        .beginWrite = NULL,
-        .endWrite = NULL,
+        .setCtrlLineStateCb = NULL,
+        .setBaudRateCb = NULL,
+        .writeBuf = uartWriteBuf,
+        .beginWrite = uartBeginWrite,
+        .endWrite = uartEndWrite,
     }
 };
+
+#ifdef USE_GDBSP_DRIVER
+// GDBSP driver uses IRQ handlers with different naming scheme
+#define UART_IRQHandler(type, number, dev)                      \
+    FAST_IRQ_HANDLER void CONCAT(                              \
+        _UART_GET_PREFIX(dev),                                  \
+        number ## _IRQHandler)(void)                            \
+    {                                                           \
+        uartPort_t *uartPort = &(uartDevice[(dev)].port);       \
+        uartIrqHandler(uartPort);                               \
+    }
+#else
+#define UART_IRQHandler(type, number, dev)                      \
+    FAST_IRQ_HANDLER void type ## number ## _IRQHandler(void)   \
+    {                                                           \
+        uartPort_t *uartPort = &(uartDevice[(dev)].port);       \
+        uartIrqHandler(uartPort);                               \
+    }                                                           \
+/**/
+#endif
+
+#ifdef USE_UART0
+UART_IRQHandler(USART, 0, UARTDEV_0) // USART0 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART1
+UART_IRQHandler(USART, 1, UARTDEV_1) // USART1 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART2
+UART_IRQHandler(USART, 2, UARTDEV_2) // USART2 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART3
+UART_IRQHandler(USART, 3, UARTDEV_3) // USART3 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART4
+UART_IRQHandler(UART, 4, UARTDEV_4)  // UART4 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART5
+UART_IRQHandler(UART, 5, UARTDEV_5)  // UART5 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART6
+UART_IRQHandler(USART, 6, UARTDEV_6) // USART6 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART7
+UART_IRQHandler(UART, 7, UARTDEV_7)  // UART7 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART8
+UART_IRQHandler(UART, 8, UARTDEV_8)  // UART8 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART9
+UART_IRQHandler(UART, 9, UARTDEV_9)  // UART9 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART10
+UART_IRQHandler(USART, 10, UARTDEV_10) // UART10 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART11
+UART_IRQHandler(UART, 11, UARTDEV_11) // UART11 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART12
+UART_IRQHandler(UART, 12, UARTDEV_12) // UART12 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART13
+UART_IRQHandler(UART, 13, UARTDEV_13) // UART13 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART14
+UART_IRQHandler(UART, 14, UARTDEV_14) // UART14 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_UART15
+UART_IRQHandler(UART, 15, UARTDEV_15) // UART15 Rx/Tx IRQ Handler
+#endif
+
+#ifdef USE_LPUART1
+UART_IRQHandler(LPUART, 1, UARTDEV_LP1) // LPUART1 Rx/Tx IRQ Handler
+#endif
+
+#endif // USE_UART

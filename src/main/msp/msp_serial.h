@@ -1,36 +1,95 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
+#include "drivers/time.h"
+
+#include "io/serial.h"
+
 #include "msp/msp.h"
 
 // Each MSP port requires state and a receive buffer, revisit this default if someone needs more than 3 MSP ports.
+#ifndef MAX_MSP_PORT_COUNT
 #define MAX_MSP_PORT_COUNT 3
+#endif
+
+// A feature that speaks MSP over the UART it declares needs an MSP port there,
+// which the user never assigned: an MSP-transport rangefinder or optical flow
+// module, or an MSP DisplayPort OSD.  Those get their own budget, so declaring
+// one can never cost a configurator link.  Each can sit on its own UART; two
+// features sharing one dedup to a single port.
+#if defined(USE_RANGEFINDER_MT)
+#define IMPLIED_MSP_RANGEFINDER_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_RANGEFINDER_PORT_COUNT 0
+#endif
+#if defined(USE_OPTICALFLOW_MT)
+#define IMPLIED_MSP_OPTICALFLOW_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_OPTICALFLOW_PORT_COUNT 0
+#endif
+#if defined(USE_OSD) && defined(USE_MSP_DISPLAYPORT)
+#define IMPLIED_MSP_OSD_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_OSD_PORT_COUNT 0
+#endif
+#if defined(USE_VTX_MSP)
+#define IMPLIED_MSP_VTX_PORT_COUNT 1
+#else
+#define IMPLIED_MSP_VTX_PORT_COUNT 0
+#endif
+
+#define IMPLIED_MSP_PORT_COUNT \
+    (IMPLIED_MSP_RANGEFINDER_PORT_COUNT + IMPLIED_MSP_OPTICALFLOW_PORT_COUNT \
+     + IMPLIED_MSP_OSD_PORT_COUNT + IMPLIED_MSP_VTX_PORT_COUNT)
+
+#define MSP_PORT_COUNT (MAX_MSP_PORT_COUNT + IMPLIED_MSP_PORT_COUNT)
+
+typedef enum {
+    PORT_IDLE,
+    PORT_MSP_PACKET,
+    PORT_CLI_ACTIVE,
+    PORT_CLI_CMD
+} mspPortState_e;
 
 typedef enum {
     MSP_IDLE,
     MSP_HEADER_START,
     MSP_HEADER_M,
-    MSP_HEADER_ARROW,
-    MSP_HEADER_SIZE,
-    MSP_HEADER_CMD,
+    MSP_HEADER_X,
+
+    MSP_HEADER_V1,
+    MSP_PAYLOAD_V1,
+    MSP_CHECKSUM_V1,
+
+    MSP_HEADER_V2_OVER_V1,
+    MSP_PAYLOAD_V2_OVER_V1,
+    MSP_CHECKSUM_V2_OVER_V1,
+
+    MSP_HEADER_V2_NATIVE,
+    MSP_PAYLOAD_V2_NATIVE,
+    MSP_CHECKSUM_V2_NATIVE,
+
     MSP_COMMAND_RECEIVED
-} mspState_e;
+} mspPacketState_e;
 
 typedef enum {
     MSP_PACKET_COMMAND,
@@ -42,36 +101,70 @@ typedef enum {
     MSP_SKIP_NON_MSP_DATA
 } mspEvaluateNonMspData_e;
 
+typedef enum {
+    MSP_PENDING_NONE,
+    MSP_PENDING_BOOTLOADER_ROM,
+    MSP_PENDING_CLI,
+    MSP_PENDING_BOOTLOADER_FLASH,
+} mspPendingSystemRequest_e;
+
 #define MSP_PORT_INBUF_SIZE 192
+#define MSP_PORT_OUTBUF_SIZE_MIN 512 // As of 2021/08/10 MSP_BOXNAMES generates a 307 byte response for page 1. There has been overflow issues with 320 byte buffer.
+
 #ifdef USE_FLASHFS
-#ifdef STM32F1
-#define MSP_PORT_DATAFLASH_BUFFER_SIZE 1024
-#else
 #define MSP_PORT_DATAFLASH_BUFFER_SIZE 4096
-#endif
 #define MSP_PORT_DATAFLASH_INFO_SIZE 16
 #define MSP_PORT_OUTBUF_SIZE (MSP_PORT_DATAFLASH_BUFFER_SIZE + MSP_PORT_DATAFLASH_INFO_SIZE)
 #else
-#define MSP_PORT_OUTBUF_SIZE 256
+#define MSP_PORT_OUTBUF_SIZE MSP_PORT_OUTBUF_SIZE_MIN // As of 2021/08/10 MSP_BOXNAMES generates a 307 byte response for page 1.
 #endif
+
+typedef struct __attribute__((packed)) {
+    uint8_t size;
+    uint8_t cmd;
+} mspHeaderV1_t;
+
+typedef struct __attribute__((packed)) {
+    uint16_t size;
+} mspHeaderJUMBO_t;
+
+typedef struct __attribute__((packed)) {
+    uint8_t  flags;
+    uint16_t cmd;
+    uint16_t size;
+} mspHeaderV2_t;
+
+#define MSP_MAX_HEADER_SIZE     9
 
 struct serialPort_s;
 typedef struct mspPort_s {
     struct serialPort_s *port; // null when port unused.
-    uint8_t offset;
-    uint8_t dataSize;
-    uint8_t checksum;
-    uint8_t cmdMSP;
-    mspState_e c_state;
+    timeMs_t lastActivityMs;
+    mspPendingSystemRequest_e pendingRequest;
+    mspPortState_e portState;
+    mspPacketState_e packetState;
     mspPacketType_e packetType;
     uint8_t inBuf[MSP_PORT_INBUF_SIZE];
+    uint16_t cmdMSP;
+    uint8_t cmdFlags;
+    mspVersion_e mspVersion;
+    uint_fast16_t offset;
+    uint_fast16_t dataSize;
+    uint8_t checksum1;
+    uint8_t checksum2;
+    bool sharedWithTelemetry;
+    mspDescriptor_t descriptor;
 } mspPort_t;
 
+#define MSP_ACTIVITY_DEFAULT_TIMEOUT_MS 5000
 
 void mspSerialInit(void);
 bool mspSerialWaiting(void);
 void mspSerialProcess(mspEvaluateNonMspData_e evaluateNonMspData, mspProcessCommandFnPtr mspProcessCommandFn, mspProcessReplyFnPtr mspProcessReplyFn);
 void mspSerialAllocatePorts(void);
 void mspSerialReleasePortIfAllocated(struct serialPort_s *serialPort);
-int mspSerialPush(uint8_t cmd, uint8_t *data, int datalen);
+void mspSerialReleaseSharedTelemetryPorts(void);
+mspDescriptor_t getMspSerialPortDescriptor(const serialPortIdentifier_e portIdentifier);
+int mspSerialPush(serialPortIdentifier_e port, uint8_t cmd, uint8_t *data, int datalen, mspDirection_e direction, mspVersion_e mspVersion);
 uint32_t mspSerialTxBytesFree(void);
+bool mspSerialIsConfiguratorActive(void);

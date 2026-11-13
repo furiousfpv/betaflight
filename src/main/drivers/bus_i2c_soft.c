@@ -1,24 +1,29 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
 #include <stdint.h>
 
-#include <platform.h>
+#include "platform.h"
+
+#ifdef USE_SOFT_I2C
 
 #include "build/build_config.h"
 
@@ -27,8 +32,6 @@
 
 // Software I2C driver, using same pins as hardware I2C, with hw i2c module disabled.
 // Can be configured for I2C2 pinout (SCL: PB10, SDA: PB11) or I2C1 pinout (SCL: PB6, SDA: PB7)
-
-#ifdef SOFT_I2C
 
 static IO_t scl;
 static IO_t sda;
@@ -165,7 +168,7 @@ static uint8_t I2C_ReceiveByte(void)
     return byte;
 }
 
-void i2cInit(I2CDevice device)
+void i2cInit(i2cDevice_e device)
 {
     UNUSED(device);
 
@@ -176,7 +179,7 @@ void i2cInit(I2CDevice device)
     IOConfigGPIO(sda, IOCFG_OUT_OD);
 }
 
-bool i2cWriteBuffer(I2CDevice device, uint8_t addr, uint8_t reg, uint8_t len, uint8_t * data)
+bool i2cWriteBuffer(i2cDevice_e device, uint8_t addr, uint8_t reg, uint8_t len, uint8_t * data)
 {
     UNUSED(device);
 
@@ -204,7 +207,7 @@ bool i2cWriteBuffer(I2CDevice device, uint8_t addr, uint8_t reg, uint8_t len, ui
     return true;
 }
 
-bool i2cWrite(I2CDevice device, uint8_t addr, uint8_t reg, uint8_t data)
+bool i2cWrite(i2cDevice_e device, uint8_t addr, uint8_t reg, uint8_t data)
 {
     UNUSED(device);
 
@@ -225,7 +228,7 @@ bool i2cWrite(I2CDevice device, uint8_t addr, uint8_t reg, uint8_t data)
     return true;
 }
 
-bool i2cRead(I2CDevice device, uint8_t addr, uint8_t reg, uint8_t len, uint8_t *buf)
+bool i2cRead(i2cDevice_e device, uint8_t addr, uint8_t reg, uint8_t len, uint8_t *buf)
 {
     UNUSED(device);
 
@@ -264,4 +267,3 @@ uint16_t i2cGetErrorCounter(void)
 }
 
 #endif
-

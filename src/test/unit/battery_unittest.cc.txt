@@ -270,10 +270,10 @@ TEST(BatteryTest, RollOverPattern2)
 extern "C" {
 
 uint8_t armingFlags = 0;
-int16_t rcCommand[4] = {0,0,0,0};
+float rcCommand[4] = {0,0,0,0};
 
 
-bool feature(uint32_t mask)
+bool featureIsEnabled(uint32_t mask)
 {
     UNUSED(mask);
     return false;
@@ -284,12 +284,6 @@ throttleStatus_e calculateThrottleStatus(rxConfig_t *rxConfig, uint16_t deadband
     UNUSED(*rxConfig);
     UNUSED(deadband3d_throttle);
     return THROTTLE_HIGH;
-}
-
-uint16_t adcGetChannel(uint8_t channel)
-{
-    UNUSED(channel);
-    return currentADCReading;
 }
 
 void delay(uint32_t ms)

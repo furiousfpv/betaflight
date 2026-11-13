@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 // this file is copied with modifications from bradwii for jd385
@@ -22,7 +25,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 
-#include <platform.h>
+#include "platform.h"
 
 #ifdef USE_RX_V202
 
@@ -30,8 +33,11 @@
 
 #include "common/utils.h"
 
-#include "drivers/rx_nrf24l01.h"
-#include "drivers/system.h"
+#include "pg/rx.h"
+
+#include "drivers/io.h"
+#include "drivers/rx/rx_nrf24l01.h"
+#include "drivers/time.h"
 
 #include "rx/rx.h"
 #include "rx/rx_spi.h"
@@ -152,7 +158,7 @@ static void decode_bind_packet(uint8_t *packet)
 // Returns whether the data was successfully decoded
 static rx_spi_received_e decode_packet(uint8_t *packet)
 {
-    if(bind_phase != PHASE_BOUND) {
+    if (bind_phase != PHASE_BOUND) {
         decode_bind_packet(packet);
         return RX_SPI_RECEIVED_BIND;
     }
@@ -196,7 +202,7 @@ void v202Nrf24SetRcDataFromPayload(uint16_t *rcData, const uint8_t *packet)
 
 static rx_spi_received_e readrx(uint8_t *packet)
 {
-    if (!(NRF24L01_ReadReg(NRF24L01_07_STATUS) & BV(NRF24L01_07_STATUS_RX_DR))) {
+    if (!(NRF24L01_ReadReg(NRF24L01_07_STATUS) & BIT(NRF24L01_07_STATUS_RX_DR))) {
         uint32_t t = micros() - packet_timer;
         if (t > rx_timeout) {
             switch_channel();
@@ -205,7 +211,7 @@ static rx_spi_received_e readrx(uint8_t *packet)
         return RX_SPI_RECEIVED_NONE;
     }
     packet_timer = micros();
-    NRF24L01_WriteReg(NRF24L01_07_STATUS, BV(NRF24L01_07_STATUS_RX_DR)); // clear the RX_DR flag
+    NRF24L01_WriteReg(NRF24L01_07_STATUS, BIT(NRF24L01_07_STATUS_RX_DR)); // clear the RX_DR flag
     NRF24L01_ReadPayload(packet, V2X2_PAYLOAD_SIZE);
     NRF24L01_FlushRx();
 
@@ -224,10 +230,10 @@ rx_spi_received_e v202Nrf24DataReceived(uint8_t *packet)
 
 static void v202Nrf24Setup(rx_spi_protocol_e protocol)
 {
-    NRF24L01_Initialize(BV(NRF24L01_00_CONFIG_EN_CRC) | BV(NRF24L01_00_CONFIG_CRCO)); // 2-bytes CRC
+    NRF24L01_Initialize(BIT(NRF24L01_00_CONFIG_EN_CRC) | BIT(NRF24L01_00_CONFIG_CRCO)); // 2-bytes CRC
 
     NRF24L01_WriteReg(NRF24L01_01_EN_AA, 0x00);      // No Auto Acknowledgment
-    NRF24L01_WriteReg(NRF24L01_02_EN_RXADDR, BV(NRF24L01_02_EN_RXADDR_ERX_P0));  // Enable data pipe 0
+    NRF24L01_WriteReg(NRF24L01_02_EN_RXADDR, BIT(NRF24L01_02_EN_RXADDR_ERX_P0));  // Enable data pipe 0
     NRF24L01_WriteReg(NRF24L01_03_SETUP_AW, NRF24L01_03_SETUP_AW_5BYTES);   // 5-byte RX/TX address
     NRF24L01_WriteReg(NRF24L01_04_SETUP_RETR, 0xFF); // 4ms retransmit t/o, 15 tries
     if (protocol == RX_SPI_NRF24_V202_250K) {
@@ -235,7 +241,7 @@ static void v202Nrf24Setup(rx_spi_protocol_e protocol)
     } else {
         NRF24L01_WriteReg(NRF24L01_06_RF_SETUP, NRF24L01_06_RF_SETUP_RF_DR_1Mbps | NRF24L01_06_RF_SETUP_RF_PWR_n12dbm);
     }
-    NRF24L01_WriteReg(NRF24L01_07_STATUS, BV(NRF24L01_07_STATUS_RX_DR) | BV(NRF24L01_07_STATUS_TX_DS) | BV(NRF24L01_07_STATUS_MAX_RT));     // Clear data ready, data sent, and retransmit
+    NRF24L01_WriteReg(NRF24L01_07_STATUS, BIT(NRF24L01_07_STATUS_RX_DR) | BIT(NRF24L01_07_STATUS_TX_DS) | BIT(NRF24L01_07_STATUS_MAX_RT));     // Clear data ready, data sent, and retransmit
     NRF24L01_WriteReg(NRF24L01_11_RX_PW_P0, V2X2_PAYLOAD_SIZE);  // bytes of data payload for pipe 0
     NRF24L01_WriteReg(NRF24L01_17_FIFO_STATUS, 0x00); // Just in case, no real bits to write here
 #define RX_TX_ADDR_LEN 5
@@ -253,9 +259,13 @@ static void v202Nrf24Setup(rx_spi_protocol_e protocol)
     NRF24L01_SetRxMode(); // enter receive mode to start listening for packets
 }
 
-void v202Nrf24Init(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool v202Nrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = V2X2_RC_CHANNEL_COUNT;
-    v202Nrf24Setup((rx_spi_protocol_e)rxConfig->rx_spi_protocol);
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = V2X2_RC_CHANNEL_COUNT;
+    v202Nrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol);
+
+    return true;
 }
 #endif

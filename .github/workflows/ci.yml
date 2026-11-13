@@ -1,0 +1,102 @@
+# Builds Betaflight Firmware.
+#
+
+name: CI
+
+on:
+  workflow_call:
+    inputs:
+      release_build:
+        description: 'Specifies if it is a build that should include commit hash in hex file names or not'
+        default: false
+        required: false
+        type: boolean
+
+jobs:
+  setup:
+    name: Setup
+    runs-on: ubuntu-latest
+    outputs:
+      sdk-config: ${{ steps.sdk-config.outputs.matrix }}
+      tools-cache-key: ${{ steps.tools-key.outputs.key }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v5
+
+      - name: Init config submodule
+        run: git submodule update --init -- src/config
+
+      - name: Compute tools cache key
+        id: tools-key
+        run: echo "key=${{ runner.os }}-tools-v2-${{ hashFiles('mk/tools.mk', 'src/platform/*/mk/*.mk') }}" >> $GITHUB_OUTPUT
+
+      - name: Hydrate configuration
+        run: make configs
+
+      - name: Build SDK pipeline config
+        id: sdk-config
+        run: |
+          # Get grouped targets (sdk:target1 target2 ...)
+          grouped=$(make targets-ci-grouped-print)
+          declare -A sdk_targets
+          while IFS=: read -r sdk targets; do
+            sdk_targets[$sdk]=$(echo "$targets" | jq -R -c 'split(" ")')
+          done <<< "$grouped"
+
+          # Get all registered SDKs + none
+          all_sdks="$(make platform-sdk-list-print) none"
+
+          # Build matrix include array
+          json="["
+          first=true
+          for sdk in $all_sdks; do
+            targets=${sdk_targets[$sdk]:-'["None"]'}
+            $first || json="$json,"
+            json="$json{\"sdk\":\"$sdk\",\"targets\":$(echo "$targets" | jq -R -c .)}"
+            first=false
+          done
+          json="$json]"
+          echo "matrix=$json" >> "$GITHUB_OUTPUT"
+
+  sdk-pipeline:
+    name: ${{ matrix.sdk }}
+    needs: setup
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJson(needs.setup.outputs.sdk-config) }}
+    uses: ./.github/workflows/ci-sdk.yml
+    with:
+      sdk: ${{ matrix.sdk }}
+      targets: ${{ matrix.targets }}
+      tools-cache-key: ${{ needs.setup.outputs.tools-cache-key }}
+      release_build: ${{ inputs.release_build }}
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies
+        run: sudo apt-get install -y libblocksruntime-dev clang-18
+
+      - name: Run sanity checks
+        run: make EXTRA_FLAGS=-Werror checks
+
+      - name: Run all unit tests
+        run: make EXTRA_FLAGS=-Werror test-all
+
+  result:
+    name: Complete
+    needs: [sdk-pipeline, test]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check SDK pipeline result
+        if: ${{ needs.sdk-pipeline.result != 'success' }}
+        run: exit 1
+
+      - name: Check test result
+        if: ${{ needs.test.result != 'success' }}
+        run: exit 1

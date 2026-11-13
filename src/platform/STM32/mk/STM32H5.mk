@@ -1,0 +1,225 @@
+#
+# H5 Make file include
+#
+
+# Auto-hydrate STM32CubeH5 submodule when building H5 targets
+PLATFORM_SDK := stm32h5
+PLATFORM_SDK_STAMP := $(STM32H5_SDK_STAMP)
+
+ifeq ($(DEBUG_HARDFAULTS),H5)
+CFLAGS          += -DDEBUG_HARDFAULTS
+endif
+
+#CMSIS
+CMSIS_DIR      := $(LIB_MODULES_DIR)/STM32H5/Drivers/CMSIS
+
+#STDPERIPH
+STDPERIPH_DIR   = $(LIB_MODULES_DIR)/STM32H5/Drivers/STM32H5xx_HAL_Driver
+STDPERIPH_SRC   = \
+            stm32h5xx_hal_adc.c \
+            stm32h5xx_hal_adc_ex.c \
+            stm32h5xx_hal.c \
+            stm32h5xx_hal_cordic.c \
+            stm32h5xx_hal_cortex.c \
+            stm32h5xx_hal_dac.c \
+            stm32h5xx_hal_dac_ex.c \
+            stm32h5xx_hal_dcache.c \
+            stm32h5xx_hal_dma.c \
+            stm32h5xx_hal_dma_ex.c \
+            stm32h5xx_hal_dts.c \
+            stm32h5xx_hal_exti.c \
+            stm32h5xx_hal_flash.c \
+            stm32h5xx_hal_flash_ex.c \
+            stm32h5xx_hal_fmac.c \
+            stm32h5xx_hal_gpio.c \
+            stm32h5xx_hal_gtzc.c \
+            stm32h5xx_hal_i2c.c \
+            stm32h5xx_hal_i2c_ex.c \
+            stm32h5xx_hal_i3c.c \
+            stm32h5xx_hal_icache.c \
+            stm32h5xx_hal_otfdec.c \
+            stm32h5xx_hal_pcd.c \
+            stm32h5xx_hal_pcd_ex.c \
+            stm32h5xx_hal_pka.c \
+            stm32h5xx_hal_pssi.c \
+            stm32h5xx_hal_pwr.c \
+            stm32h5xx_hal_pwr_ex.c \
+            stm32h5xx_hal_ramcfg.c \
+            stm32h5xx_hal_rcc.c \
+            stm32h5xx_hal_rcc_ex.c \
+            stm32h5xx_hal_rng_ex.c \
+            stm32h5xx_hal_rtc_ex.c \
+            stm32h5xx_hal_sd.c \
+            stm32h5xx_hal_smbus_ex.c \
+            stm32h5xx_hal_spi_ex.c \
+            stm32h5xx_hal_tim.c \
+            stm32h5xx_hal_tim_ex.c \
+            stm32h5xx_hal_uart.c \
+            stm32h5xx_hal_uart_ex.c \
+            stm32h5xx_hal_xspi.c \
+            stm32h5xx_ll_cordic.c \
+            stm32h5xx_ll_crs.c \
+            stm32h5xx_ll_dlyb.c \
+            stm32h5xx_ll_dma.c \
+            stm32h5xx_ll_fmac.c \
+            stm32h5xx_ll_i2c.c \
+            stm32h5xx_ll_i3c.c \
+            stm32h5xx_ll_icache.c \
+            stm32h5xx_ll_pka.c \
+            stm32h5xx_ll_sdmmc.c \
+            stm32h5xx_ll_spi.c \
+            stm32h5xx_ll_usart.c \
+            stm32h5xx_ll_rcc.c \
+            stm32h5xx_ll_tim.c \
+            stm32h5xx_ll_ucpd.c \
+            stm32h5xx_ll_usb.c \
+            stm32h5xx_util_i3c.c
+
+#USB - Use the HAL USB Device Library (shared, MCU-agnostic)
+USBCORE_DIR = STM32_USB_Device_Library_HAL/Core
+USBCORE_SRC = \
+            $(USBCORE_DIR)/Src/usbd_core.c \
+            $(USBCORE_DIR)/Src/usbd_ctlreq.c \
+            $(USBCORE_DIR)/Src/usbd_ioreq.c
+
+USBCDC_DIR = STM32_USB_Device_Library_HAL/Class/CDC
+USBCDC_SRC = \
+            $(USBCDC_DIR)/Src/usbd_cdc.c
+
+DEVICE_STDPERIPH_SRC := $(STDPERIPH_SRC) \
+                        $(USBCORE_SRC) \
+                        $(USBCDC_SRC) \
+                        $(USBHID_SRC) \
+                        $(USBMSC_SRC)
+
+#CMSIS
+VPATH           := $(VPATH):$(CMSIS_DIR)/Include:$(CMSIS_DIR)/Device/ST/STM32H5xx:$(STDPERIPH_DIR)/Src
+CMSIS_SRC       :=
+INCLUDE_DIRS    := $(INCLUDE_DIRS) \
+                   $(TARGET_PLATFORM_DIR) \
+                   $(TARGET_PLATFORM_DIR)/include \
+                   $(TARGET_PLATFORM_DIR)/startup \
+                   $(STDPERIPH_DIR)/Inc \
+                   $(LIB_MAIN_DIR)/$(USBCORE_DIR)/Inc \
+                   $(LIB_MAIN_DIR)/$(USBCDC_DIR)/Inc \
+                   $(LIB_MAIN_DIR)/$(USBHID_DIR)/Inc \
+                   $(LIB_MAIN_DIR)/$(USBMSC_DIR)/Inc \
+                   $(CMSIS_DIR)/Core/Include \
+                   $(LIB_MODULES_DIR)/STM32H5/Drivers/CMSIS/Device/ST/STM32H5xx/Include \
+                   $(TARGET_PLATFORM_DIR)/vcp_hal
+
+#Flags
+ARCH_FLAGS      = -mthumb -mcpu=cortex-m33 -mfloat-abi=hard -mfpu=fpv5-sp-d16
+
+# Flags that are used in the STM32 libraries
+DEVICE_FLAGS    = -DUSE_HAL_DRIVER -DUSE_FULL_LL_DRIVER
+
+# Per-file warning suppressions for vendor HAL sources
+SRC_CFLAGS_stm32h5xx_hal_flash_ex.c := -Wno-old-style-definition
+SRC_CFLAGS_stm32h5xx_hal_pwr.c := -Wno-unused-parameter
+SRC_CFLAGS_stm32h5xx_hal_rcc.c := -Wno-unused-parameter
+
+#
+# H562xx : 2M FLASH, 640KB SRAM (no Ethernet)
+#
+ifeq ($(TARGET_MCU),STM32H562xx)
+DEVICE_FLAGS       += -DSTM32H562xx
+DEFAULT_LD_SCRIPT   = $(LINKER_DIR)/stm32_flash_h5xx_2m.ld
+STARTUP_SRC         = STM32/startup/startup_stm32h562xx.s
+MCU_FLASH_SIZE     := 2048
+DEVICE_FLAGS       += -DMAX_MPU_REGIONS=16
+#
+# H563xx : 2M FLASH, 640KB SRAM
+#
+else ifeq ($(TARGET_MCU),STM32H563xx)
+DEVICE_FLAGS       += -DSTM32H563xx
+DEFAULT_LD_SCRIPT   = $(LINKER_DIR)/stm32_flash_h5xx_2m.ld
+STARTUP_SRC         = STM32/startup/startup_stm32h563xx.s
+MCU_FLASH_SIZE     := 2048
+DEVICE_FLAGS       += -DMAX_MPU_REGIONS=16
+# end H5xx
+else
+$(error Unknown MCU for STM32H5 target)
+endif
+
+ifneq ($(DEBUG),GDB)
+OPTIMISE_DEFAULT    := -Os
+OPTIMISE_SPEED      := -Os
+OPTIMISE_SIZE       := -Os
+LTO_FLAGS           := $(OPTIMISATION_BASE) $(OPTIMISE_DEFAULT)
+endif
+
+ifeq ($(LD_SCRIPT),)
+LD_SCRIPT = $(DEFAULT_LD_SCRIPT)
+endif
+
+ifneq ($(FIRMWARE_SIZE),)
+DEVICE_FLAGS   += -DFIRMWARE_SIZE=$(FIRMWARE_SIZE)
+endif
+
+DEVICE_FLAGS    += -DHSE_VALUE=$(HSE_VALUE) -DHSE_STARTUP_TIMEOUT=1000 -DSTM32
+
+VCP_SRC = \
+            STM32/vcp_hal/usbd_desc.c \
+            STM32/vcp_hal/usbd_conf_stm32h5xx.c \
+            STM32/vcp_hal/usbd_cdc_hid.c \
+            STM32/vcp_hal/usbd_cdc_interface.c \
+            STM32/serial_usb_vcp.c \
+            drivers/usb_io.c
+
+MCU_COMMON_SRC = \
+            drivers/bus_i2c_timing.c \
+            drivers/bus_quadspi.c \
+            drivers/dshot_bitbang_decode.c \
+            STM32/bus_i2c_ll_init.c \
+            STM32/bus_i2c_ll.c \
+            STM32/bus_spi_ll.c \
+            STM32/bus_quadspi_hal.c \
+            STM32/debug.c \
+            STM32/dma_reqmap_mcu.c \
+            STM32/dshot_bitbang_ll.c \
+            STM32/dshot_bitbang.c \
+            STM32/exti.c \
+            STM32/io_stm32.c \
+            STM32/light_ws2811strip_hal.c \
+            STM32/persistent.c \
+            STM32/pwm_output_dshot_hal.c \
+            STM32/rcc_stm32.c \
+            STM32/serial_uart_ll.c \
+            STM32/timer_hal.c \
+            STM32/transponder_ir_io_hal.c \
+            STM32/camera_control_stm32.c \
+            STM32/dma_stm32h5xx.c \
+            STM32/system_stm32h5xx.c \
+            drivers/adc.c \
+            drivers/serial_escserial.c \
+            STM32/serial_uart_stm32h5xx.c \
+            STM32/adc_stm32h5xx.c \
+            STM32/timer_stm32h5xx.c \
+            STM32/memprot_stm32h5xx.c \
+            STM32/sdio_h5xx.c \
+            STM32/startup/system_stm32h5xx.c
+
+MSC_SRC =
+#MSC_SRC = \
+            usb_msc_hal.c \
+            drivers/usb_msc_common.c \
+            msc/usbd_storage.c \
+            msc/usbd_storage_emfat.c \
+            msc/emfat.c \
+            msc/emfat_file.c \
+            msc/usbd_storage_sd_spi.c \
+            msc/usbd_storage_sdio.c
+
+SPEED_OPTIMISED_SRC += \
+            STM32/exti.c
+
+SIZE_OPTIMISED_SRC += \
+            drivers/bus_i2c_timing.c \
+            STM32/bus_i2c_ll_init.c \
+            drivers/serial_escserial.c
+
+DSP_LIB := $(LIB_MODULES_DIR)/STM32H5/Drivers/CMSIS/DSP
+DEVICE_FLAGS += -DARM_MATH_MATRIX_CHECK -DARM_MATH_ROUNDING -DUNALIGNED_SUPPORT_DISABLE -DARM_MATH_CM33
+
+include $(TARGET_PLATFORM_DIR)/mk/STM32_COMMON.mk

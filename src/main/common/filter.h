@@ -1,93 +1,169 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
-#ifdef STM32F10X
-#define MAX_FIR_DENOISE_WINDOW_SIZE 60
-#else
-#define MAX_FIR_DENOISE_WINDOW_SIZE 120
-#endif
+#include <stdbool.h>
+#include <stdint.h>
+
+struct filter_s;
+typedef struct filter_s filter_t;
+typedef float (*filterApplyFnPtr)(filter_t *filter, float input);
+
+typedef enum {
+    FILTER_PT1 = 0,
+    FILTER_SVF,
+    FILTER_PT2,
+    FILTER_PT3,
+} lowpassFilterType_e;
 
 typedef struct pt1Filter_s {
     float state;
     float k;
-    float RC;
-    float dT;
 } pt1Filter_t;
 
-/* this holds the data required to update samples thru a filter */
-typedef struct biquadFilter_s {
-    float b0, b1, b2, a1, a2;
-    float d1, d2;
-} biquadFilter_t;
+typedef struct pt2Filter_s {
+    float state;
+    float state1;
+    float k;
+} pt2Filter_t;
 
-typedef struct firFilterDenoise_s{
-    int filledCount;
-    int targetCount;
-    int index;
+typedef struct pt3Filter_s {
+    float state;
+    float state1;
+    float state2;
+    float k;
+} pt3Filter_t;
+
+// SVF filter in TPT form
+// heavily optimized to work as a lowpass filter
+// Q is always 0.7071 or butterworth
+typedef struct svfLowpassFilter_s {
+    float f;
+    float a1;
+    float a2;
+    float ic1;
+    float ic2;
+} svfLowpassFilter_t;
+
+// SVF filter in TPT form
+// this version will have issues if you change Q on the fly
+// Q must remain constant across updates as Q is baked into ic1q
+// heavily optimized to work as a notch filter
+typedef struct svfNotchFilter_s {
+    float a1;
+    float a2q;  // a2 * q
+    float fq;   // f * Q
+    float ic1q; // State 1 scaled by q
+    float ic2;  // State 2 (unscaled)
+} svfNotchFilter_t;
+
+// SVF filter in TPT form
+// heavily optimized to work as a notch filter with a weight
+typedef struct rpmNotch_s {
+    float f;
+    float a1;
+    float a2;
+    float wq;          // q * weight — fully precomputed notch+weight term
+    float ic1[3];
+    float ic2[3];
+} rpmNotch_t;
+
+typedef struct phaseComp_s {
+    float b0, b1, a1;
+    float x1, y1;
+} phaseComp_t;
+
+typedef struct slewFilter_s {
+    float state;
+    float slewLimit;
+    float threshold;
+} slewFilter_t;
+
+typedef struct laggedMovingAverage_s {
+    uint16_t movingWindowIndex;
+    uint16_t windowSize;
     float movingSum;
-    float state[MAX_FIR_DENOISE_WINDOW_SIZE];
-} firFilterDenoise_t;
-
-typedef enum {
-    FILTER_PT1 = 0,
-    FILTER_BIQUAD,
-    FILTER_FIR
-} filterType_e;
-
-typedef enum {
-    FILTER_LPF,
-    FILTER_NOTCH
-} biquadFilterType_e;
-
-typedef struct firFilter_s {
     float *buf;
-    const float *coeffs;
-    float movingSum;
-    uint8_t index;
-    uint8_t count;
-    uint8_t bufLength;
-    uint8_t coeffsLength;
-} firFilter_t;
+    bool primed;
+} laggedMovingAverage_t;
 
-typedef float (*filterApplyFnPtr)(void *filter, float input);
+typedef struct simpleLowpassFilter_s {
+    int32_t fp;
+    int32_t beta;
+    int32_t fpShift;
+} simpleLowpassFilter_t;
 
-float nullFilterApply(void *filter, float input);
+typedef struct meanAccumulator_s {
+    int32_t accumulator;
+    int32_t count;
+} meanAccumulator_t;
 
-void biquadFilterInitLPF(biquadFilter_t *filter, float filterFreq, uint32_t refreshRate);
-void biquadFilterInit(biquadFilter_t *filter, float filterFreq, uint32_t refreshRate, float Q, biquadFilterType_e filterType);
-float biquadFilterApply(biquadFilter_t *filter, float input);
-float filterGetNotchQ(uint16_t centerFreq, uint16_t cutoff);
+float nullFilterApply(filter_t *filter, float input);
 
-void pt1FilterInit(pt1Filter_t *filter, uint8_t f_cut, float dT);
+float pt1FilterGain(float f_cut, float dT);
+float pt1FilterGainFromDelay(float delay, float dT);
+void pt1FilterInit(pt1Filter_t *filter, float k);
+void pt1FilterUpdateCutoff(pt1Filter_t *filter, float k);
 float pt1FilterApply(pt1Filter_t *filter, float input);
-float pt1FilterApply4(pt1Filter_t *filter, float input, uint8_t f_cut, float dT);
 
-void firFilterInit(firFilter_t *filter, float *buf, uint8_t bufLength, const float *coeffs);
-void firFilterInit2(firFilter_t *filter, float *buf, uint8_t bufLength, const float *coeffs, uint8_t coeffsLength);
-void firFilterUpdate(firFilter_t *filter, float input);
-void firFilterUpdateAverage(firFilter_t *filter, float input);
-float firFilterApply(const firFilter_t *filter);
-float firFilterUpdateAndApply(firFilter_t *filter, float input);
-float firFilterCalcPartialAverage(const firFilter_t *filter, uint8_t count);
-float firFilterCalcMovingAverage(const firFilter_t *filter);
-float firFilterLastInput(const firFilter_t *filter);
+float pt2FilterGain(float f_cut, float dT);
+float pt2FilterGainFromDelay(float delay, float dT);
+void pt2FilterInit(pt2Filter_t *filter, float k);
+void pt2FilterUpdateCutoff(pt2Filter_t *filter, float k);
+float pt2FilterApply(pt2Filter_t *filter, float input);
 
-void firFilterDenoiseInit(firFilterDenoise_t *filter, uint8_t gyroSoftLpfHz, uint16_t targetLooptime);
-float firFilterDenoiseUpdate(firFilterDenoise_t *filter, float input);
+float pt3FilterGain(float f_cut, float dT);
+float pt3FilterGainFromDelay(float delay, float dT);
+void pt3FilterInit(pt3Filter_t *filter, float k);
+void pt3FilterUpdateCutoff(pt3Filter_t *filter, float k);
+float pt3FilterApply(pt3Filter_t *filter, float input);
 
+float filterGetNotchQ(float centerFreq, float cutoffFreq);
+
+void svfLowpassFilterInit(svfLowpassFilter_t *filter, float filterFreq, float dt);
+void svfLowpassFilterUpdate(svfLowpassFilter_t *filter, float filterFreq, float dt);
+float svfLowpassFilterApply(svfLowpassFilter_t *filter, float input);
+
+void svfNotchInit(svfNotchFilter_t *filter, float filterFreq, float dt, float Q);
+void svfNotchUpdate(svfNotchFilter_t *filter, float filterFreq, float dt, float Q);
+float svfNotchApply(svfNotchFilter_t *filter, float input);
+
+void rpmNotchInit(rpmNotch_t *filter, float filterFreq, float dt, float Q, float weight);
+void rpmNotchUpdate(rpmNotch_t *filter, float filterFreq, float dt, float Q, float weight);
+void rpmNotchApply(rpmNotch_t *filter, float input[3]);
+
+void phaseCompInit(phaseComp_t *filter, const float centerFreq, const float centerPhase, const uint32_t looptimeUs);
+void phaseCompUpdate(phaseComp_t *filter, const float centerFreq, const float centerPhase, const uint32_t looptimeUs);
+float phaseCompApply(phaseComp_t *filter, const float input);
+void phaseCompReset(phaseComp_t *filter);
+
+void slewFilterInit(slewFilter_t *filter, float slewLimit, float threshold);
+float slewFilterApply(slewFilter_t *filter, float input);
+
+void laggedMovingAverageInit(laggedMovingAverage_t *filter, uint16_t windowSize, float *buf);
+float laggedMovingAverageUpdate(laggedMovingAverage_t *filter, float input);
+
+void simpleLPFilterInit(simpleLowpassFilter_t *filter, int32_t beta, int32_t fpShift);
+int32_t simpleLPFilterUpdate(simpleLowpassFilter_t *filter, int32_t newVal);
+
+void meanAccumulatorInit(meanAccumulator_t *filter);
+void meanAccumulatorAdd(meanAccumulator_t *filter, const int8_t newVal);
+int8_t meanAccumulatorCalc(meanAccumulator_t *filter, const int8_t defaultValue);

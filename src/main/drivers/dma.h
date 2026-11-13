@@ -1,139 +1,82 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
-#include "resource.h"
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "drivers/resource.h"
+
+#define CACHE_LINE_SIZE 32
+#define CACHE_LINE_MASK (CACHE_LINE_SIZE - 1)
+
+#define DMA_NONE 0
+#define DMA_FIRST_HANDLER 1
+
+// dmaIdentifier_e values are platform-specific.
+// Specific handler identifiers (e.g. DMA1_ST0_HANDLER) are defined
+// in platform headers and only used within src/platform code.
+typedef int dmaIdentifier_e;
+
+// dmaResource_t is an opaque data type which represents a single DMA engine,
+// called and implemented differently in different families of MCUs.
+// The opaque data type provides uniform handling of the engine in source code.
+// The engines are referenced by dmaResource_t throughout the Betaflight code,
+// and then converted back to the native MCU type when calling library functions
+// within platform implementation code.
+typedef struct dmaResource_s dmaResource_t;
 
 struct dmaChannelDescriptor_s;
 typedef void (*dmaCallbackHandlerFuncPtr)(struct dmaChannelDescriptor_s *channelDescriptor);
 
 typedef struct dmaChannelDescriptor_s {
-    DMA_TypeDef*                dma;
-#if defined(STM32F4) || defined(STM32F7)
-    DMA_Stream_TypeDef*         ref;
-#else
-    DMA_Channel_TypeDef*        ref;
-#endif
+    void                        *dma;
+    dmaResource_t               *ref;
+    uint8_t                     stream;
+    uint32_t                    channel;
     dmaCallbackHandlerFuncPtr   irqHandlerCallback;
     uint8_t                     flagsShift;
-    IRQn_Type                   irqN;
-    uint32_t                    rcc;
+    int32_t                     irqN;
     uint32_t                    userParam;
-    resourceOwner_e             owner;
-    uint8_t                     resourceIndex;
+    resourceOwner_t             resourceOwner;
+    uint32_t                    completeFlag;
+    void                        *dmamux;
 } dmaChannelDescriptor_t;
 
-#if defined(STM32F7)
-//#define HAL_CLEANINVALIDATECACHE(addr, size) (SCB_CleanInvalidateDCache_by_Addr((uint32_t*)((uint32_t)addr & ~0x1f), ((uint32_t)(addr + size + 0x1f) & ~0x1f) - ((uint32_t)addr & ~0x1f)))
-//#define HAL_CLEANCACHE(addr, size) (SCB_CleanDCache_by_Addr((uint32_t*)((uint32_t)addr & ~0x1f), ((uint32_t)(addr + size + 0x1f) & ~0x1f) - ((uint32_t)addr & ~0x1f)))
-#endif
+#define DMA_IDENTIFIER_TO_INDEX(x) ((x) - DMA_FIRST_HANDLER)
 
-#if defined(STM32F4) || defined(STM32F7)
-uint32_t dmaFlag_IT_TCIF(const DMA_Stream_TypeDef *stream);
+void dmaMuxEnable(dmaIdentifier_e identifier, uint32_t dmaMuxId);
 
-typedef enum {
-    DMA1_ST0_HANDLER = 0,
-    DMA1_ST1_HANDLER,
-    DMA1_ST2_HANDLER,
-    DMA1_ST3_HANDLER,
-    DMA1_ST4_HANDLER,
-    DMA1_ST5_HANDLER,
-    DMA1_ST6_HANDLER,
-    DMA1_ST7_HANDLER,
-    DMA2_ST0_HANDLER,
-    DMA2_ST1_HANDLER,
-    DMA2_ST2_HANDLER,
-    DMA2_ST3_HANDLER,
-    DMA2_ST4_HANDLER,
-    DMA2_ST5_HANDLER,
-    DMA2_ST6_HANDLER,
-    DMA2_ST7_HANDLER,
-    DMA_MAX_DESCRIPTORS
-} dmaIdentifier_e;
-
-#define DMA_MOD_VALUE       8
-#define DMA_MOD_OFFSET      0
-#define DMA_OUTPUT_INDEX    0
-#define DMA_OUTPUT_STRING   "DMA%d Stream %d:"
-
-#define DEFINE_DMA_CHANNEL(d, s, f, i, r) {.dma = d, .ref = s, .irqHandlerCallback = NULL, .flagsShift = f, .irqN = i, .rcc = r, .userParam = 0, .owner = 0, .resourceIndex = 0 }
-#define DEFINE_DMA_IRQ_HANDLER(d, s, i) void DMA ## d ## _Stream ## s ## _IRQHandler(void) {\
-                                                                if (dmaDescriptors[i].irqHandlerCallback)\
-                                                                    dmaDescriptors[i].irqHandlerCallback(&dmaDescriptors[i]);\
-                                                            }
-
-#define DMA_CLEAR_FLAG(d, flag) if(d->flagsShift > 31) d->dma->HIFCR = (flag << (d->flagsShift - 32)); else d->dma->LIFCR = (flag << d->flagsShift)
-#define DMA_GET_FLAG_STATUS(d, flag) (d->flagsShift > 31 ? d->dma->HISR & (flag << (d->flagsShift - 32)): d->dma->LISR & (flag << d->flagsShift))
-
-
-#define DMA_IT_TCIF         ((uint32_t)0x00000020)
-#define DMA_IT_HTIF         ((uint32_t)0x00000010)
-#define DMA_IT_TEIF         ((uint32_t)0x00000008)
-#define DMA_IT_DMEIF        ((uint32_t)0x00000004)
-#define DMA_IT_FEIF         ((uint32_t)0x00000001)
-
-dmaIdentifier_e dmaGetIdentifier(const DMA_Stream_TypeDef* stream);
-dmaChannelDescriptor_t* getDmaDescriptor(const DMA_Stream_TypeDef* stream);
-
-#else
-
-typedef enum {
-    DMA1_CH1_HANDLER = 0,
-    DMA1_CH2_HANDLER,
-    DMA1_CH3_HANDLER,
-    DMA1_CH4_HANDLER,
-    DMA1_CH5_HANDLER,
-    DMA1_CH6_HANDLER,
-    DMA1_CH7_HANDLER,
-#if defined(STM32F3) || defined(STM32F10X_CL)
-    DMA2_CH1_HANDLER,
-    DMA2_CH2_HANDLER,
-    DMA2_CH3_HANDLER,
-    DMA2_CH4_HANDLER,
-    DMA2_CH5_HANDLER,
-#endif
-    DMA_MAX_DESCRIPTORS
-} dmaIdentifier_e;
-
-#define DMA_MOD_VALUE       7
-#define DMA_MOD_OFFSET      1
-#define DMA_OUTPUT_INDEX    0
-#define DMA_OUTPUT_STRING   "DMA%d Channel %d:"
-
-#define DEFINE_DMA_CHANNEL(d, c, f, i, r) {.dma = d, .ref = c, .irqHandlerCallback = NULL, .flagsShift = f, .irqN = i, .rcc = r, .userParam = 0, .owner = 0, .resourceIndex = 0 }
-#define DEFINE_DMA_IRQ_HANDLER(d, c, i) void DMA ## d ## _Channel ## c ## _IRQHandler(void) {\
-                                                                        if (dmaDescriptors[i].irqHandlerCallback)\
-                                                                            dmaDescriptors[i].irqHandlerCallback(&dmaDescriptors[i]);\
-                                                                    }
-
-#define DMA_CLEAR_FLAG(d, flag) d->dma->IFCR = (flag << d->flagsShift)
-#define DMA_GET_FLAG_STATUS(d, flag) (d->dma->ISR & (flag << d->flagsShift))
-
-#define DMA_IT_TCIF         ((uint32_t)0x00000002)
-#define DMA_IT_HTIF         ((uint32_t)0x00000004)
-#define DMA_IT_TEIF         ((uint32_t)0x00000008)
-
-dmaIdentifier_e dmaGetIdentifier(const DMA_Channel_TypeDef* channel);
-
-#endif
-
-void dmaInit(dmaIdentifier_e identifier, resourceOwner_e owner, uint8_t resourceIndex);
+bool dmaAllocate(dmaIdentifier_e identifier, resourceOwner_e owner, uint8_t resourceIndex);
+void dmaEnable(dmaIdentifier_e identifier);
 void dmaSetHandler(dmaIdentifier_e identifier, dmaCallbackHandlerFuncPtr callback, uint32_t priority, uint32_t userParam);
 
-resourceOwner_e dmaGetOwner(dmaIdentifier_e identifier);
-uint8_t dmaGetResourceIndex(dmaIdentifier_e identifier);
+dmaIdentifier_e dmaGetIdentifier(const dmaResource_t* channel);
+const resourceOwner_t *dmaGetOwner(dmaIdentifier_e identifier);
+dmaChannelDescriptor_t* dmaGetDescriptorByIdentifier(const dmaIdentifier_e identifier);
+uint32_t dmaGetChannel(const uint8_t channel);
+
+// Hardware abstraction - implemented per platform
+int dmaGetHandlerCount(void);
+// Longest is "DMAnn Channel nnn:" plus the terminator
+#define DMA_DISPLAY_NAME_LENGTH 20
+void dmaGetDisplayName(dmaIdentifier_e identifier, char *name);
+uint32_t dmaGetDataLength(dmaResource_t *ref);

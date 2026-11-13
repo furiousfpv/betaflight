@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
@@ -39,9 +42,12 @@ extern int32_t blackboxHeaderBudget;
 
 void blackboxOpen(void);
 void blackboxWrite(uint8_t value);
+int blackboxWriteString(const char *s);
 
 void blackboxDeviceFlush(void);
 bool blackboxDeviceFlushForce(void);
+bool blackboxDeviceFlushForceComplete(void);
+
 bool blackboxDeviceOpen(void);
 void blackboxDeviceClose(void);
 
@@ -52,6 +58,9 @@ bool blackboxDeviceBeginLog(void);
 bool blackboxDeviceEndLog(bool retainLog);
 
 bool isBlackboxDeviceFull(void);
+bool isBlackboxDeviceWorking(void);
+int32_t blackboxGetLogNumber(void);
 
-void blackboxReplenishHeaderBudget();
+void blackboxReplenishHeaderBudget(void);
 blackboxBufferReserveStatus_e blackboxDeviceReserveBufferSpace(int32_t bytes);
+int8_t blackboxGetLogFileNo(void);

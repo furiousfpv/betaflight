@@ -1,0 +1,289 @@
+/*
+ * This file is part of Cleanflight.
+ *
+ * Cleanflight is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License as published by
+ * the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+ *
+ * Cleanflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#include <limits.h>
+
+extern "C" {
+    #include "platform.h"
+    #include "build/debug.h"
+    #include "drivers/io.h"
+    #include "common/maths.h"
+    #include "flight/failsafe.h"
+    #include "pg/pg.h"
+    #include "pg/pg_ids.h"
+    #include "pg/rx.h"
+    #include "fc/rc_controls.h"
+    #include "fc/rc_modes.h"
+    #include "fc/runtime_config.h"
+    #include "rx/rx.h"
+}
+
+#include "unittest_macros.h"
+#include "gtest/gtest.h"
+
+extern "C" {
+
+PG_REGISTER(flight3DConfig_t, flight3DConfig, PG_MOTOR_3D_CONFIG, 0);
+PG_REGISTER(failsafeConfig_t, failsafeConfig, PG_FAILSAFE_CONFIG, 0);
+
+extern boxBitmask_t rcModeActivationMask;
+int16_t debug[DEBUG16_VALUE_COUNT];
+uint8_t debugMode = 0;
+uint8_t armingFlags = 0;
+
+extern float applyRxChannelRangeConfiguraton(float sample, const scaleRangef_t *range);
+}
+
+static inline void scaleRangefInitHelper(scaleRangef_t *range, int min, int max)
+{
+    scaleRangefInit(range, min, max, PWM_RANGE_MIN, PWM_RANGE_MAX);
+}
+TEST(RxChannelRangeTest, TestRxChannelRanges)
+{
+    memset(&rcModeActivationMask, 0, sizeof(rcModeActivationMask)); // BOXFAILSAFE must be OFF
+
+    scaleRangef_t range;
+
+    // No signal, special condition
+    scaleRangefInitHelper(&range, 1000, 2000);
+    EXPECT_EQ(0, applyRxChannelRangeConfiguraton(0, &range));
+    scaleRangefInitHelper(&range, 1300, 1700);
+    EXPECT_EQ(0, applyRxChannelRangeConfiguraton(0, &range));
+    scaleRangefInitHelper(&range, 900, 2100);
+    EXPECT_EQ(0, applyRxChannelRangeConfiguraton(0, &range));
+
+    // Exact mapping
+    scaleRangefInitHelper(&range, 1000, 2000);
+    EXPECT_EQ(1000, applyRxChannelRangeConfiguraton(1000, &range));
+    EXPECT_EQ(1500, applyRxChannelRangeConfiguraton(1500, &range));
+    EXPECT_EQ(2000, applyRxChannelRangeConfiguraton(2000, &range));
+    EXPECT_EQ(700, applyRxChannelRangeConfiguraton(700, &range));
+    EXPECT_EQ(2500, applyRxChannelRangeConfiguraton(2500, &range));
+
+    // Reversed channel
+    scaleRangefInitHelper(&range, 2000, 1000);
+    EXPECT_EQ(2000, applyRxChannelRangeConfiguraton(1000, &range));
+    EXPECT_EQ(1500, applyRxChannelRangeConfiguraton(1500, &range));
+    EXPECT_EQ(1000, applyRxChannelRangeConfiguraton(2000, &range));
+
+    // Shifted range
+    scaleRangefInitHelper(&range, 900, 1900);
+    EXPECT_EQ(1000, applyRxChannelRangeConfiguraton(900, &range));
+    EXPECT_EQ(1500, applyRxChannelRangeConfiguraton(1400, &range));
+    EXPECT_EQ(2000, applyRxChannelRangeConfiguraton(1900, &range));
+    EXPECT_EQ(700, applyRxChannelRangeConfiguraton(600, &range));
+    EXPECT_EQ(2600, applyRxChannelRangeConfiguraton(2500, &range));
+
+    // Narrower range than expected
+    scaleRangefInitHelper(&range, 1300, 1700);
+    EXPECT_EQ(1000, applyRxChannelRangeConfiguraton(1300, &range));
+    EXPECT_EQ(1500, applyRxChannelRangeConfiguraton(1500, &range));
+    EXPECT_EQ(2000, applyRxChannelRangeConfiguraton(1700, &range));
+    EXPECT_EQ(-500, applyRxChannelRangeConfiguraton(700, &range));
+    EXPECT_EQ(4000, applyRxChannelRangeConfiguraton(2500, &range));
+
+    // Wider range than expected
+    scaleRangefInitHelper(&range, 900, 2100);
+    EXPECT_EQ(1000, applyRxChannelRangeConfiguraton(900, &range));
+    EXPECT_EQ(1500, applyRxChannelRangeConfiguraton(1500, &range));
+    EXPECT_EQ(2000, applyRxChannelRangeConfiguraton(2100, &range));
+    EXPECT_EQ(750, applyRxChannelRangeConfiguraton(600, &range));
+    EXPECT_EQ(2500, applyRxChannelRangeConfiguraton(2700, &range));
+
+    // extreme out of range
+    scaleRangefInitHelper(&range, 1000, 2000);
+    EXPECT_EQ(1, applyRxChannelRangeConfiguraton(1, &range));
+    scaleRangefInitHelper(&range, 1300, 1700);
+    EXPECT_EQ(-2245, applyRxChannelRangeConfiguraton(2, &range));
+    scaleRangefInitHelper(&range, 900, 2100);
+    EXPECT_NEAR(252.5f, applyRxChannelRangeConfiguraton(3, &range), 0.01f);
+
+    scaleRangefInitHelper(&range, 1000, 2000);
+    EXPECT_EQ(10000, applyRxChannelRangeConfiguraton(10000, &range));
+    scaleRangefInitHelper(&range, 1300, 1700);
+    EXPECT_EQ(22750, applyRxChannelRangeConfiguraton(10000, &range));
+    scaleRangefInitHelper(&range, 900, 2100);
+    EXPECT_EQ(25250, applyRxChannelRangeConfiguraton(30000, &range));
+}
+
+
+// stubs
+extern "C" {
+
+void failsafeOnRxSuspend(uint32_t ) {}
+void failsafeOnRxResume(void) {}
+bool failsafeIsActive(void) { return false; }
+bool failsafeIsReceivingRxData(void) { return true; }
+bool taskUpdateRxMainInProgress(void) { return true; }
+void setArmingDisabled(armingDisableFlags_e flag) { UNUSED(flag); }
+void unsetArmingDisabled(armingDisableFlags_e flag) { UNUSED(flag); }
+uint16_t flightModeFlags = 0;
+
+uint32_t micros(void) { return 0; }
+uint32_t millis(void) { return 0; }
+
+void rxPwmInit(rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+}
+
+bool sbusInit(rxConfig_t *initialRxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(initialRxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool spektrumInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool sumdInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool sumhInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool crsfRxInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool jetiExBusInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool ibusInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool xBusInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool rxMspInit(rxConfig_t *rxConfig, rxRuntimeState_t *rxRuntimeState, rcReadRawDataFnPtr *callback)
+{
+    UNUSED(rxConfig);
+    UNUSED(rxRuntimeState);
+    UNUSED(callback);
+    return true;
+}
+
+bool featureIsEnabled(uint32_t)
+{
+    return false;
+}
+
+void featureDisableImmediate(uint32_t)
+{
+}
+
+bool rxMspFrameComplete(void)
+{
+    return false;
+}
+
+bool isPPMDataBeingReceived(void)
+{
+    return false;
+}
+
+bool isPWMDataBeingReceived(void)
+{
+    return false;
+}
+
+void resetPPMDataReceivedState(void)
+{
+}
+
+void failsafeOnValidDataReceived(void)
+{
+}
+
+void failsafeOnValidDataFailed(void)
+{
+}
+
+uint32_t failsafeFailurePeriodMs(void)
+{
+    return 400;
+}
+
+float pt1FilterGain(float f_cut, float dT)
+{
+    UNUSED(f_cut);
+    UNUSED(dT);
+    return 0.0;
+}
+
+void pt1FilterInit(pt1Filter_t *filter, float k)
+{
+    UNUSED(filter);
+    UNUSED(k);
+}
+
+void pt1FilterUpdateCutoff(pt1Filter_t *filter, float k)
+{
+    UNUSED(filter);
+    UNUSED(k);
+}
+
+float pt1FilterApply(pt1Filter_t *filter, float input)
+{
+    UNUSED(filter);
+    UNUSED(input);
+    return 0.0;
+}
+
+void pinioBoxTaskControl(void) {}
+
+}

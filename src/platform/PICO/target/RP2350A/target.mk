@@ -1,0 +1,6 @@
+TARGET_MCU        := RP2350A
+TARGET_MCU_FAMILY := RP2350
+
+DEVICE_FLAGS    += -DPICO_RP2350A=1
+
+include $(TARGET_PLATFORM_DIR)/target/common/target_RP2350.mk

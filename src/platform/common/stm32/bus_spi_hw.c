@@ -1,0 +1,366 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "platform.h"
+
+#include "build/atomic.h"
+
+#ifdef USE_SPI
+
+#include "drivers/bus.h"
+#include "drivers/bus_spi.h"
+#include "drivers/bus_spi_impl.h"
+#include "drivers/dma_reqmap.h"
+#include "platform/dma.h"
+#include "drivers/dshot.h"
+#include "drivers/nvic.h"
+#include "pg/bus_spi.h"
+
+extern spiDevice_t spiDevice[SPIDEV_COUNT];
+extern busDevice_t spiBusDevice[SPIDEV_COUNT];
+
+// Interrupt handler for SPI receive DMA completion
+FAST_IRQ_HANDLER static void spiRxIrqHandler(dmaChannelDescriptor_t* descriptor)
+{
+    const extDevice_t *dev = (const extDevice_t *)descriptor->userParam;
+
+    if (!dev) {
+        return;
+    }
+
+    // The stream disables itself on a transfer error, so no completion interrupt will follow
+    if (DMA_GET_FLAG_STATUS(descriptor, DMA_IT_TEIF)) {
+        spiAbortTransfer(dev);
+        return;
+    }
+
+    busDevice_t *bus = dev->bus;
+
+    if (bus->curSegment->negateCS) {
+        // Negate Chip Select
+        IOHi(dev->busType_u.spi.csnPin);
+    }
+
+    spiInternalStopDMA(dev);
+
+#ifdef __DCACHE_PRESENT
+#if defined(STM32H7) || defined(GD32H7)
+    if (bus->curSegment->u.buffers.rxData &&
+#ifdef STM32H7
+        // BDMA data was copied out of its bounce buffer by the CPU, so the cache is current
+        !IS_BDMA_DESCRIPTOR(descriptor) &&
+#endif
+        !isDmaramUncached(bus->curSegment->u.buffers.rxData, bus->curSegment->len)) {
+#else
+    if (bus->curSegment->u.buffers.rxData) {
+#endif
+         // Invalidate the D cache covering the area into which data has been read
+        SCB_InvalidateDCache_by_Addr(
+            (uint32_t *)((uint32_t)bus->curSegment->u.buffers.rxData & ~CACHE_LINE_MASK),
+            (((uint32_t)bus->curSegment->u.buffers.rxData & CACHE_LINE_MASK) +
+              bus->curSegment->len - 1 + CACHE_LINE_SIZE) & ~CACHE_LINE_MASK);
+    }
+#endif // __DCACHE_PRESENT
+
+    spiIrqHandler(dev);
+}
+
+// Only the transfer error interrupt is enabled on the transmit stream of a full duplex transfer
+FAST_IRQ_HANDLER static void spiTxErrorIrqHandler(dmaChannelDescriptor_t* descriptor)
+{
+    const extDevice_t *dev = (const extDevice_t *)descriptor->userParam;
+
+    if (!dev || !DMA_GET_FLAG_STATUS(descriptor, DMA_IT_TEIF)) {
+        return;
+    }
+
+    DMA_CLEAR_FLAG(descriptor, DMA_IT_TEIF);
+    spiAbortTransfer(dev);
+}
+
+#ifdef USE_TX_IRQ_HANDLER
+// Interrupt handler for SPI transmit DMA completion
+FAST_IRQ_HANDLER static void spiTxIrqHandler(dmaChannelDescriptor_t* descriptor)
+{
+    const extDevice_t *dev = (const extDevice_t *)descriptor->userParam;
+
+    if (!dev) {
+        return;
+    }
+
+    if (DMA_GET_FLAG_STATUS(descriptor, DMA_IT_TEIF)) {
+        spiAbortTransfer(dev);
+        return;
+    }
+
+    busDevice_t *bus = dev->bus;
+
+    spiInternalStopDMA(dev);
+
+    if (bus->curSegment->negateCS) {
+        // Negate Chip Select
+        IOHi(dev->busType_u.spi.csnPin);
+    }
+
+    spiIrqHandler(dev);
+}
+#endif
+
+uint16_t spiCalculateDivider(uint32_t freq)
+{
+#if defined(STM32F4) || defined(STM32F7) || defined(APM32F4)
+    uint32_t spiClk = SystemCoreClock / 2;
+#elif defined(STM32C5)
+    // C5 leaves every SPI kernel clock on its APB clock (see the STM32C5 note
+    // in spiInitDevice()), and system_stm32c5xx.c programs
+    // HCLK = PCLK1 = PCLK2 = PCLK3 = SYSCLK, so PCLK == SystemCoreClock for
+    // every instance. Read it at runtime rather than hard-coding: SYSCLK is
+    // 144 MHz on both the HSE/PSI and the HSIS path, but stays at the 48 MHz
+    // boot clock if both fail.
+    uint32_t spiClk = SystemCoreClock;
+#elif defined(STM32H7) || defined(STM32H5) || defined(STM32N6)
+    uint32_t spiClk = 100000000;
+#elif defined(STM32G4)
+    uint32_t spiClk = SystemCoreClock;
+#elif defined(AT32F4)
+    if(freq > 36000000){
+        freq = 36000000;
+    }
+
+    uint32_t spiClk = system_core_clock / 2;
+#elif defined(GD32F4)
+    if(freq > 30000000){
+        freq = 30000000;
+    }
+
+    uint32_t spiClk = SystemCoreClock / 2;
+#elif defined(GD32H7)
+    if(freq > 100000000){
+        freq = 100000000;
+    }
+
+    uint32_t spiClk = SystemCoreClock / 2;
+#else
+#error "Base SPI clock not defined for this architecture"
+#endif
+
+    uint16_t divisor = 2;
+
+    spiClk >>= 1;
+
+    for (; (spiClk > freq) && (divisor < 256); divisor <<= 1, spiClk >>= 1);
+
+    return divisor;
+}
+
+uint32_t spiCalculateClock(uint16_t spiClkDivisor)
+{
+#if defined(STM32F4) || defined(STM32G4) || defined(STM32F7) || defined(APM32F4)
+    uint32_t spiClk = SystemCoreClock / 2;
+#elif defined(STM32C5)
+    // PCLK == SystemCoreClock on C5; see spiCalculateDivider() above.
+    uint32_t spiClk = SystemCoreClock;
+#elif defined(STM32H7) || defined(STM32H5) || defined(STM32N6)
+    uint32_t spiClk = 100000000;
+#elif defined(AT32F4)
+    uint32_t spiClk = system_core_clock / 2;
+
+    if ((spiClk / spiClkDivisor) > 36000000){
+        return 36000000;
+    }
+#elif defined(GD32F4)
+    uint32_t spiClk = SystemCoreClock / 2;
+
+    if ((spiClk / spiClkDivisor) > 30000000){
+        return 30000000;
+    }
+#elif defined(GD32H7)
+    uint32_t spiClk = SystemCoreClock / 4;
+
+    if ((spiClk / spiClkDivisor) > 100000000){
+        return 100000000;
+    }
+#else
+#error "Base SPI clock not defined for this architecture"
+#endif
+
+    return spiClk / spiClkDivisor;
+}
+
+void spiInitBusDMA(void)
+{
+    uint32_t device;
+#if (defined(STM32F4) || defined(APM32F4) || defined(GD32F4)) && defined(USE_DSHOT_BITBANG)
+    /* Check https://www.st.com/resource/en/errata_sheet/dm00037591-stm32f405407xx-and-stm32f415417xx-device-limitations-stmicroelectronics.pdf
+     * section 2.1.10 which reports an errata that corruption may occurs on DMA2 if AHB peripherals (eg GPIO ports) are
+     * access concurrently with APB peripherals (eg SPI busses). Bitbang DSHOT uses DMA2 to write to GPIO ports. If this
+     * is enabled, then don't enable DMA on an SPI bus using DMA2
+     */
+    const bool dshotBitbangActive = isDshotBitbangActive(&motorConfig()->dev);
+#endif
+
+    for (device = 0; device < SPIDEV_COUNT; device++) {
+        busDevice_t *bus = &spiBusDevice[device];
+
+        if (bus->busType != BUS_TYPE_SPI) {
+            // This bus is not in use
+            continue;
+        }
+
+#if defined(STM32N6)
+        // SPI DMA is not implemented on the N6: spiInternalInitStream() has an
+        // explicit "GPDMA uses a completely different LL_DMA API; SPI DMA not
+        // yet supported" stub for this family. Allocating the channels anyway
+        // sets bus->useDMA, so spiUseDMA() returns true and callers select a
+        // DMA path that is never programmed.
+        //
+        // For the gyro this is fatal rather than merely slow. mpuGyroInit()
+        // picks GYRO_EXTI_INT_DMA, the first data-ready interrupt starts a
+        // transfer that never completes, INT_STATUS is therefore never read,
+        // the sensor holds its interrupt line asserted and no further edge is
+        // produced. Measured on an STM32N657 board: detectedEXTI frozen at
+        // 151357, gyroADCRaw stuck at (0,0,0), and not one byte of gyroDev
+        // changing over 0.7 s.
+        //
+        // Leave the bus in polled mode until the GPDMA path exists.
+        continue;
+#endif
+
+        dmaIdentifier_e dmaTxIdentifier = DMA_NONE;
+        dmaIdentifier_e dmaRxIdentifier = DMA_NONE;
+
+        int8_t txDmaopt = spiPinConfig(device)->txDmaopt;
+        uint8_t txDmaoptMin = 0;
+        uint8_t txDmaoptMax = MAX_PERIPHERAL_DMA_OPTIONS - 1;
+
+        if (txDmaopt != -1) {
+            txDmaoptMin = txDmaopt;
+            txDmaoptMax = txDmaopt;
+        }
+
+        for (uint8_t opt = txDmaoptMin; opt <= txDmaoptMax; opt++) {
+            const dmaChannelSpec_t *dmaTxChannelSpec = dmaGetChannelSpecByPeripheral(DMA_PERIPH_SPI_SDO, device, opt);
+
+            if (dmaTxChannelSpec) {
+                dmaTxIdentifier = dmaGetIdentifier(dmaTxChannelSpec->ref);
+#if (defined(STM32F4) || defined(APM32F4) || defined(GD32F4)) && defined(USE_DSHOT_BITBANG)
+                if (dshotBitbangActive && (DMA_DEVICE_NO(dmaTxIdentifier) == 2)) {
+                    dmaTxIdentifier = DMA_NONE;
+                    break;
+                }
+#endif
+                if (!dmaAllocate(dmaTxIdentifier, OWNER_SPI_SDO, device + 1)) {
+                    dmaTxIdentifier = DMA_NONE;
+                    continue;
+                }
+                bus->dmaTx = dmaGetDescriptorByIdentifier(dmaTxIdentifier);
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32H7) || defined(APM32F4) || defined(GD32F4) || defined(GD32H7)
+                bus->dmaTx->stream = DMA_DEVICE_INDEX(dmaTxIdentifier);
+                bus->dmaTx->channel = dmaTxChannelSpec->channel;
+#endif
+
+                dmaEnable(dmaTxIdentifier);
+#if defined(USE_ATBSP_DRIVER)
+                dmaMuxEnable(dmaTxIdentifier,dmaTxChannelSpec->dmaMuxId);
+#endif
+                break;
+            }
+        }
+
+        int8_t rxDmaopt = spiPinConfig(device)->rxDmaopt;
+        uint8_t rxDmaoptMin = 0;
+        uint8_t rxDmaoptMax = MAX_PERIPHERAL_DMA_OPTIONS - 1;
+
+        if (rxDmaopt != -1) {
+            rxDmaoptMin = rxDmaopt;
+            rxDmaoptMax = rxDmaopt;
+        }
+
+        for (uint8_t opt = rxDmaoptMin; opt <= rxDmaoptMax; opt++) {
+            const dmaChannelSpec_t *dmaRxChannelSpec = dmaGetChannelSpecByPeripheral(DMA_PERIPH_SPI_SDI, device, opt);
+
+            if (dmaRxChannelSpec) {
+                dmaRxIdentifier = dmaGetIdentifier(dmaRxChannelSpec->ref);
+#if (defined(STM32F4) || defined(APM32F4) || defined(GD32F4)) && defined(USE_DSHOT_BITBANG)
+                if (dshotBitbangActive && (DMA_DEVICE_NO(dmaRxIdentifier) == 2)) {
+                    dmaRxIdentifier = DMA_NONE;
+                    break;
+                }
+#endif
+                if (!dmaAllocate(dmaRxIdentifier, OWNER_SPI_SDI, device + 1)) {
+                    dmaRxIdentifier = DMA_NONE;
+                    continue;
+                }
+                bus->dmaRx = dmaGetDescriptorByIdentifier(dmaRxIdentifier);
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32H7) || defined(APM32F4) || defined(GD32F4) || defined(GD32H7)
+                bus->dmaRx->stream = DMA_DEVICE_INDEX(dmaRxIdentifier);
+                bus->dmaRx->channel = dmaRxChannelSpec->channel;
+#endif
+
+                dmaEnable(dmaRxIdentifier);
+#if defined(USE_ATBSP_DRIVER)
+                dmaMuxEnable(dmaRxIdentifier,dmaRxChannelSpec->dmaMuxId);
+#endif
+                break;
+            }
+        }
+
+        if (dmaTxIdentifier && dmaRxIdentifier) {
+            // Ensure streams are disabled
+            spiInternalResetStream(bus->dmaRx);
+            spiInternalResetStream(bus->dmaTx);
+
+            spiInternalResetDescriptors(bus);
+
+            /* Note that this driver may be called both from the normal thread of execution, or from USB interrupt
+             * handlers, so the DMA completion interrupt must be at a higher priority
+             */
+            dmaSetHandler(dmaRxIdentifier, spiRxIrqHandler, NVIC_PRIO_SPI_DMA, 0);
+            dmaSetHandler(dmaTxIdentifier, spiTxErrorIrqHandler, NVIC_PRIO_SPI_DMA, 0);
+
+            bus->useDMA = true;
+#ifdef USE_TX_IRQ_HANDLER
+        } else if (dmaTxIdentifier) {
+            // Transmit on DMA is adequate for OSD so worth having
+            bus->dmaTx = dmaGetDescriptorByIdentifier(dmaTxIdentifier);
+            bus->dmaRx = (dmaChannelDescriptor_t *)NULL;
+
+            // Ensure streams are disabled
+            spiInternalResetStream(bus->dmaTx);
+
+            spiInternalResetDescriptors(bus);
+
+            dmaSetHandler(dmaTxIdentifier, spiTxIrqHandler, NVIC_PRIO_SPI_DMA, 0);
+
+            bus->useDMA = true;
+#endif
+        } else {
+            // Disassociate channels from bus
+            bus->dmaRx = (dmaChannelDescriptor_t *)NULL;
+            bus->dmaTx = (dmaChannelDescriptor_t *)NULL;
+        }
+    }
+}
+
+#endif

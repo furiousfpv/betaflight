@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -20,14 +23,14 @@
 
 #include "platform.h"
 
-#include "drivers/system.h"
 #include "drivers/io.h"
+#include "drivers/pwm_output.h"
+
+#include "pg/beeper_dev.h"
 
 #include "sound_beeper.h"
-#include "pwm_output.h"
 
-
-#ifdef BEEPER
+#ifdef USE_BEEPER
 static IO_t beeperIO = DEFIO_IO(NONE);
 static bool beeperInverted = false;
 static uint16_t beeperFrequency = 0;
@@ -35,12 +38,15 @@ static uint16_t beeperFrequency = 0;
 
 void systemBeep(bool onoff)
 {
-#ifdef BEEPER
-    if(beeperFrequency == 0) {
+#ifdef USE_BEEPER
+    if (beeperFrequency == 0) {
         IOWrite(beeperIO, beeperInverted ? onoff : !onoff);
-    } else {
+    }
+#ifdef USE_PWM_OUTPUT
+    else {
         pwmWriteBeeper(onoff);
     }
+#endif
 #else
     UNUSED(onoff);
 #endif
@@ -48,20 +54,23 @@ void systemBeep(bool onoff)
 
 void systemBeepToggle(void)
 {
-#ifdef BEEPER
-    if(beeperFrequency == 0) {
+#ifdef USE_BEEPER
+    if (beeperFrequency == 0) {
         IOToggle(beeperIO);
-    } else {
+    }
+#ifdef USE_PWM_OUTPUT
+    else {
         pwmToggleBeeper();
     }
+#endif
 #endif
 }
 
 void beeperInit(const beeperDevConfig_t *config)
 {
-#ifdef BEEPER
+#ifdef USE_BEEPER
     beeperFrequency = config->frequency;
-    if(beeperFrequency == 0) {
+    if (beeperFrequency == 0) {
         beeperIO = IOGetByTag(config->ioTag);
         beeperInverted = config->isInverted;
         if (beeperIO) {
@@ -69,10 +78,13 @@ void beeperInit(const beeperDevConfig_t *config)
             IOConfigGPIO(beeperIO, config->isOpenDrain ? IOCFG_OUT_OD : IOCFG_OUT_PP);
         }
         systemBeep(false);
-    } else {
-        beeperIO = IOGetByTag(config->ioTag);
-        beeperPwmInit(beeperIO, beeperFrequency);
     }
+#ifdef USE_PWM_OUTPUT
+    else {
+        const ioTag_t beeperTag = config->ioTag;
+        beeperPwmInit(beeperTag, beeperFrequency);
+    }
+#endif
 #else
     UNUSED(config);
 #endif

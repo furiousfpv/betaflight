@@ -1,0 +1,94 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#ifndef TARGET_BOARD_IDENTIFIER
+#define TARGET_BOARD_IDENTIFIER "SC56"
+#endif
+
+#define USE_I2C_DEVICE_1
+#define USE_I2C_DEVICE_2
+
+#define USE_VCP
+
+#define USE_UART1
+#define USE_UART2
+#define USE_UART3
+#define USE_UART4
+#define USE_UART5
+
+#define USE_SPI_DEVICE_1
+#define USE_SPI_DEVICE_2
+#define USE_SPI_DEVICE_3
+
+#define TARGET_IO_PORTA 0xffff
+#define TARGET_IO_PORTB 0xffff
+#define TARGET_IO_PORTC 0xffff
+#define TARGET_IO_PORTD 0xffff
+#define TARGET_IO_PORTE 0xffff
+// Port H has only PH0-PH5 and PH15
+#define TARGET_IO_PORTH (BIT(0)|BIT(1)|BIT(2)|BIT(3)|BIT(4)|BIT(5)|BIT(15))
+
+#define USE_I2C
+#define I2C_FULL_RECONFIGURABILITY
+
+#define USE_SPI
+#define SPI_FULL_RECONFIGURABILITY
+
+// STM32C5 has no SDMMC peripheral -- neither the C5 CMSIS device headers
+// nor the C591/C5A3/C562 datasheets mention SDMMC/SDIO -- so SD cards are
+// supported in SPI mode only.
+//
+// Clock note: the SPI kernel clock is PCLK (see the STM32C5 note in
+// spiInitDevice()) and system_stm32c5xx.c runs PCLK1/2/3 at SYSCLK =
+// 144 MHz, while the SPI master prescaler tops out at /256. So the slowest
+// SCK the hardware can produce is 562.5 kHz, above the 400 kHz ceiling the
+// SD spec sets for card identification. Cards are generally tolerant of
+// this, but a card that refuses to enumerate on C5 while working on other
+// targets is most likely hitting it. The data phase is unaffected: /8 gives
+// 18 MHz, inside the 25 MHz SPI-mode limit.
+#ifdef USE_SDCARD
+#define USE_SDCARD_SPI
+#endif
+
+// Run SPI transfers over LPDMA. Allocated late (after motor timers) so DShot
+// bitbang claims its LPDMA channels first; SPI takes what remains.
+#define USE_SPI_DMA_ENABLE_LATE
+
+#define USE_ADC
+#define USE_EXTI
+
+#undef USE_TRANSPONDER
+
+#define FLASH_PAGE_SIZE ((uint32_t)0x2000) // 8K sectors
+
+#define EEPROM_SIZE     8192
+
+#ifndef DEFAULT_PID_PROCESS_DENOM
+#define DEFAULT_PID_PROCESS_DENOM       4
+#endif
+
+// C5's bus options (I2C / I3C-as-I2C) are slow per-byte at the moment;
+// slow the baro state-machine tick from the BF default of 40 Hz to 20 Hz.
+#ifndef TASK_BARO_RATE_HZ
+#define TASK_BARO_RATE_HZ               20
+#endif

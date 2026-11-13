@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -22,14 +25,15 @@
 
 #include "platform.h"
 
-#ifdef GPS
+#include "gps_conversion.h"
 
+#ifdef USE_GPS
 
 #define DIGIT_TO_VAL(_x)    (_x - '0')
 uint32_t GPS_coord_to_degrees(const char* coordinateString)
 {
     const char *fieldSeparator, *remainingString;
-    uint8_t degress = 0, minutes = 0;
+    uint8_t degrees = 0, minutes = 0;
     uint16_t fractionalMinutes = 0;
     uint8_t digitIndex;
 
@@ -42,9 +46,9 @@ uint32_t GPS_coord_to_degrees(const char* coordinateString)
 
     // convert degrees
     while ((fieldSeparator - remainingString) > 2) {
-        if (degress)
-            degress *= 10;
-        degress += DIGIT_TO_VAL(*remainingString++);
+        if (degrees)
+            degrees *= 10;
+        degrees += DIGIT_TO_VAL(*remainingString++);
     }
     // convert minutes
     while (fieldSeparator > remainingString) {
@@ -63,6 +67,6 @@ uint32_t GPS_coord_to_degrees(const char* coordinateString)
                 fractionalMinutes += *remainingString++ - '0';
         }
     }
-    return degress * 10000000UL + (minutes * 1000000UL + fractionalMinutes * 100UL) / 6;
+    return degrees * 10000000UL + (minutes * 1000000UL + fractionalMinutes * 100UL) / 6;
 }
 #endif

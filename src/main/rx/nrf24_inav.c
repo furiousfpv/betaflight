@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -28,8 +31,11 @@
 
 #include "common/utils.h"
 
-#include "drivers/rx_nrf24l01.h"
-#include "drivers/system.h"
+#include "pg/rx.h"
+
+#include "drivers/io.h"
+#include "drivers/rx/rx_nrf24l01.h"
+#include "drivers/time.h"
 
 #include "rx/rx.h"
 #include "rx/rx_spi.h"
@@ -41,7 +47,6 @@
 //#define DEBUG_NRF24_INAV
 //#define NO_RF_CHANNEL_HOPPING
 //#define USE_BIND_ADDRESS_FOR_DATA_STATE
-
 
 #define USE_AUTO_ACKKNOWLEDGEMENT
 
@@ -122,7 +127,7 @@ uint8_t receivedPowerSnapshot;
 #define RX_TX_ADDR_LEN 5
 // set rxTxAddr to the bind address
 STATIC_UNIT_TESTED uint8_t rxTxAddr[RX_TX_ADDR_LEN] = {0x4b,0x5c,0x6d,0x7e,0x8f};
-uint32_t *rxSpiIdPtr;
+static uint32_t *rxSpiIdPtr;
 #define RX_TX_ADDR_4 0xD2 // rxTxAddr[4] always set to this value
 
 // radio channels for frequency hopping
@@ -269,13 +274,13 @@ static void inavSetBound(void)
 
 static void writeAckPayload(const uint8_t *data, uint8_t length)
 {
-    NRF24L01_WriteReg(NRF24L01_07_STATUS, BV(NRF24L01_07_STATUS_MAX_RT));
+    NRF24L01_WriteReg(NRF24L01_07_STATUS, BIT(NRF24L01_07_STATUS_MAX_RT));
     NRF24L01_WriteAckPayload(data, length, NRF24L01_PIPE0);
 }
 
 static void writeTelemetryAckPayload(void)
 {
-#ifdef TELEMETRY_NRF24_LTM
+#ifdef USE_TELEMETRY_NRF24_LTM
     // set up telemetry data, send back telemetry data in the ACK packet
     static uint8_t sequenceNumber = 0;
     static ltm_frame_e ltmFrameType = LTM_FRAME_START;
@@ -371,16 +376,16 @@ static void inavNrf24Setup(rx_spi_protocol_e protocol, const uint32_t *rxSpiId, 
     UNUSED(rfChannelHoppingCount);
 
     // sets PWR_UP, EN_CRC, CRCO - 2 byte CRC, only get IRQ pin interrupt on RX_DR
-    NRF24L01_Initialize(BV(NRF24L01_00_CONFIG_EN_CRC) | BV(NRF24L01_00_CONFIG_CRCO) | BV(NRF24L01_00_CONFIG_MASK_MAX_RT) | BV(NRF24L01_00_CONFIG_MASK_TX_DS));
+    NRF24L01_Initialize(BIT(NRF24L01_00_CONFIG_EN_CRC) | BIT(NRF24L01_00_CONFIG_CRCO) | BIT(NRF24L01_00_CONFIG_MASK_MAX_RT) | BIT(NRF24L01_00_CONFIG_MASK_TX_DS));
 
 #ifdef USE_AUTO_ACKKNOWLEDGEMENT
-    NRF24L01_WriteReg(NRF24L01_01_EN_AA, BV(NRF24L01_01_EN_AA_ENAA_P0)); // auto acknowledgment on P0
-    NRF24L01_WriteReg(NRF24L01_02_EN_RXADDR, BV(NRF24L01_02_EN_RXADDR_ERX_P0));
+    NRF24L01_WriteReg(NRF24L01_01_EN_AA, BIT(NRF24L01_01_EN_AA_ENAA_P0)); // auto acknowledgment on P0
+    NRF24L01_WriteReg(NRF24L01_02_EN_RXADDR, BIT(NRF24L01_02_EN_RXADDR_ERX_P0));
     NRF24L01_WriteReg(NRF24L01_03_SETUP_AW, NRF24L01_03_SETUP_AW_5BYTES); // 5-byte RX/TX address
     NRF24L01_WriteReg(NRF24L01_04_SETUP_RETR, 0);
     NRF24L01_Activate(0x73); // activate R_RX_PL_WID, W_ACK_PAYLOAD, and W_TX_PAYLOAD_NOACK registers
-    NRF24L01_WriteReg(NRF24L01_1D_FEATURE, BV(NRF24L01_1D_FEATURE_EN_ACK_PAY) | BV(NRF24L01_1D_FEATURE_EN_DPL));
-    NRF24L01_WriteReg(NRF24L01_1C_DYNPD, BV(NRF24L01_1C_DYNPD_DPL_P0)); // enable dynamic payload length on P0
+    NRF24L01_WriteReg(NRF24L01_1D_FEATURE, BIT(NRF24L01_1D_FEATURE_EN_ACK_PAY) | BIT(NRF24L01_1D_FEATURE_EN_DPL));
+    NRF24L01_WriteReg(NRF24L01_1C_DYNPD, BIT(NRF24L01_1C_DYNPD_DPL_P0)); // enable dynamic payload length on P0
     //NRF24L01_Activate(0x73); // deactivate R_RX_PL_WID, W_ACK_PAYLOAD, and W_TX_PAYLOAD_NOACK registers
 
     NRF24L01_WriteRegisterMulti(NRF24L01_10_TX_ADDR, rxTxAddr, RX_TX_ADDR_LEN);
@@ -418,10 +423,13 @@ static void inavNrf24Setup(rx_spi_protocol_e protocol, const uint32_t *rxSpiId, 
     writeAckPayload(ackPayload, payloadSize);
 }
 
-void inavNrf24Init(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool inavNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = RC_CHANNEL_COUNT_MAX;
-    inavNrf24Setup((rx_spi_protocol_e)rxConfig->rx_spi_protocol, &rxConfig->rx_spi_id, rxConfig->rx_spi_rf_channel_count);
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = RC_CHANNEL_COUNT_MAX;
+    inavNrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol, &rxSpiConfig->rx_spi_id, rxSpiConfig->rx_spi_rf_channel_count);
+
+    return true;
 }
 #endif
-

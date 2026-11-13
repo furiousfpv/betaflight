@@ -1,0 +1,164 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+
+#include "platform.h"
+
+#include "common/printf.h"
+
+#ifdef USE_DMA
+
+#include "drivers/nvic.h"
+#include "drivers/dma_impl.h"
+#include "platform/dma.h"
+#include "platform/rcc.h"
+#include "drivers/resource.h"
+
+/*
+ * DMA descriptors.
+ */
+dmaChannelDescriptor_t dmaDescriptors[DMA_LAST_HANDLER] = {
+    DEFINE_DMA_CHANNEL(DMA1, 0,  0),
+    DEFINE_DMA_CHANNEL(DMA1, 1,  6),
+    DEFINE_DMA_CHANNEL(DMA1, 2, 16),
+    DEFINE_DMA_CHANNEL(DMA1, 3, 22),
+    DEFINE_DMA_CHANNEL(DMA1, 4, 32),
+    DEFINE_DMA_CHANNEL(DMA1, 5, 38),
+    DEFINE_DMA_CHANNEL(DMA1, 6, 48),
+    DEFINE_DMA_CHANNEL(DMA1, 7, 54),
+
+    DEFINE_DMA_CHANNEL(DMA2, 0,  0),
+    DEFINE_DMA_CHANNEL(DMA2, 1,  6),
+    DEFINE_DMA_CHANNEL(DMA2, 2, 16),
+    DEFINE_DMA_CHANNEL(DMA2, 3, 22),
+    DEFINE_DMA_CHANNEL(DMA2, 4, 32),
+    DEFINE_DMA_CHANNEL(DMA2, 5, 38),
+    DEFINE_DMA_CHANNEL(DMA2, 6, 48),
+    DEFINE_DMA_CHANNEL(DMA2, 7, 54),
+
+    // BDMA channels 0-7 (D3 domain, for SPI6)
+    // BDMA flags: 4 bits per channel (GIF, TCIF, HTIF, TEIF), flagsShift = channel * 4
+    DEFINE_BDMA_CHANNEL(0,  0),
+    DEFINE_BDMA_CHANNEL(1,  4),
+    DEFINE_BDMA_CHANNEL(2,  8),
+    DEFINE_BDMA_CHANNEL(3, 12),
+    DEFINE_BDMA_CHANNEL(4, 16),
+    DEFINE_BDMA_CHANNEL(5, 20),
+    DEFINE_BDMA_CHANNEL(6, 24),
+    DEFINE_BDMA_CHANNEL(7, 28),
+};
+
+/*
+ * DMA IRQ Handlers
+ */
+DEFINE_DMA_IRQ_HANDLER(1, 0, DMA1_ST0_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 1, DMA1_ST1_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 2, DMA1_ST2_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 3, DMA1_ST3_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 4, DMA1_ST4_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 5, DMA1_ST5_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 6, DMA1_ST6_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(1, 7, DMA1_ST7_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 0, DMA2_ST0_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 1, DMA2_ST1_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 2, DMA2_ST2_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 3, DMA2_ST3_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 4, DMA2_ST4_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 5, DMA2_ST5_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 6, DMA2_ST6_HANDLER)
+DEFINE_DMA_IRQ_HANDLER(2, 7, DMA2_ST7_HANDLER)
+
+/*
+ * BDMA IRQ Handlers (D3 domain)
+ */
+DEFINE_BDMA_IRQ_HANDLER(0, BDMA_CH0_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(1, BDMA_CH1_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(2, BDMA_CH2_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(3, BDMA_CH3_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(4, BDMA_CH4_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(5, BDMA_CH5_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(6, BDMA_CH6_HANDLER)
+DEFINE_BDMA_IRQ_HANDLER(7, BDMA_CH7_HANDLER)
+
+static void enableDmaClock(int index)
+{
+    if (dmaDescriptors[index].dma == (void*)BDMA) {
+#if defined(RCC_AHB4ENR_BDMA2EN)
+        // H7A3/B0/B3 alias BDMA to BDMA2, but RCC_AHB4() pastes the name before it expands
+        RCC_ClockCmd(RCC_AHB4(BDMA2), ENABLE);
+#else
+        RCC_ClockCmd(RCC_AHB4(BDMA), ENABLE);
+#endif
+        // DMAMUX2 shares clock with BDMA (no separate enable needed)
+    } else {
+        RCC_ClockCmd(dmaDescriptors[index].dma == DMA1 ? RCC_AHB1(DMA1) : RCC_AHB1(DMA2), ENABLE);
+    }
+}
+
+void dmaEnable(dmaIdentifier_e identifier)
+{
+    const int index = DMA_IDENTIFIER_TO_INDEX(identifier);
+
+    enableDmaClock(index);
+}
+
+void dmaSetHandler(dmaIdentifier_e identifier, dmaCallbackHandlerFuncPtr callback, uint32_t priority, uint32_t userParam)
+{
+    const int index = DMA_IDENTIFIER_TO_INDEX(identifier);
+
+    enableDmaClock(index);
+    dmaDescriptors[index].irqHandlerCallback = callback;
+    dmaDescriptors[index].userParam = userParam;
+
+    HAL_NVIC_SetPriority(dmaDescriptors[index].irqN, NVIC_PRIORITY_BASE(priority), NVIC_PRIORITY_SUB(priority));
+    HAL_NVIC_EnableIRQ(dmaDescriptors[index].irqN);
+}
+
+int dmaGetHandlerCount(void)
+{
+    return DMA_LAST_HANDLER;
+}
+
+void dmaGetDisplayName(dmaIdentifier_e identifier, char *name)
+{
+    if (identifier >= BDMA_CH0_HANDLER) {
+        // BDMA is a single controller of channels, not a third DMA of streams
+        tfp_sprintf(name, "BDMA Channel %d:", identifier - BDMA_CH0_HANDLER);
+    } else {
+        tfp_sprintf(name, DMA_OUTPUT_STRING, DMA_DEVICE_NO(identifier), DMA_DEVICE_INDEX(identifier));
+    }
+}
+
+uint32_t dmaGetDataLength(dmaResource_t *ref)
+{
+#if defined(STM32H7A3xx) || defined(STM32H7A3xxQ)
+    if ((uint32_t)ref >= CD_AHB2PERIPH_BASE) {
+#else
+    if ((uint32_t)ref >= D3_AHB1PERIPH_BASE) {
+#endif
+        return LL_EX_BDMA_GetDataLength((BDMA_Channel_TypeDef *)ref);
+    }
+    return LL_EX_DMA_GetDataLength((DMA_ARCH_TYPE *)ref);
+}
+
+#endif

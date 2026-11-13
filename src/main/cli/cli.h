@@ -1,0 +1,56 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <stdbool.h>
+
+extern bool cliMode;
+
+bool cliProcess(void);
+struct serialPort_s;
+void cliEnter(struct serialPort_s *serialPort, bool interactive);
+
+#ifdef CONFIG_IN_FILE
+void cliProcessConfigFile(const char *filename);
+#endif
+
+#ifdef USE_CLI
+#define CLI_IN_BUFFER_SIZE  256
+#define CLI_OUT_BUFFER_SIZE 64
+
+int cliGetSettingByName(const char *name, char *buf, int bufLen);
+int cliGetSettingInfoByName(const char *name, int offset, char *buf, int bufLen, int *totalLen);
+bool cliSetSettingByName(const char *cmdline);
+#ifdef USE_MSP_CLI_COMMAND
+#define CLI_COMMAND_REFUSED (-1)
+// Returns CLI_COMMAND_REFUSED, or the total logical output length. That length exceeds
+// outBufLen when the output was truncated; only outBufLen bytes are written to outBuf.
+int cliExecuteCommand(const char *cmdline, char *outBuf, int outBufLen);
+#endif
+#endif
+
+#ifdef USE_CLI_DEBUG_PRINT
+void cliPrint(const char *str);
+void cliPrintLinefeed(void);
+void cliPrintLine(const char *str);
+void cliPrintf(const char *format, ...);
+void cliPrintLinef(const char *format, ...);
+#endif

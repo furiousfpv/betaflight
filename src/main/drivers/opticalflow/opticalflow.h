@@ -1,0 +1,60 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include "common/vector.h"
+
+#define OPTICALFLOW_OUT_OF_RANGE        -1
+#define OPTICALFLOW_HARDWARE_FAILURE    -2
+#define OPTICALFLOW_NO_NEW_DATA         -3
+
+#define OPTICALFLOW_HARDWARE_TIMEOUT_US  100000     // 100ms
+
+typedef struct opticalflowData_s {
+    uint32_t timeStampUs;
+    int16_t quality;        // 0-100 percentage, only meaningful when flowValid is true
+    vector2_t flowRate;
+    bool rangeValid;        // rangefinder distance is within usable bounds
+    bool flowValid;         // sensor reports valid optical flow status
+    bool flowDtValid;       // integration time is positive and finite
+} opticalflowData_t;
+
+struct opticalflowDev_s;
+typedef void opflowOpInitFunc(struct opticalflowDev_s * dev);
+typedef void opflowOpUpdateFunc(struct opticalflowDev_s * dev);
+typedef void opflowOpReadFunc(struct opticalflowDev_s * dev, opticalflowData_t * result);
+
+// History depth for the gyro-rotation compensation. Sized for the slowest
+// gyroDelayUs a driver asks for, at the fastest sample rate it can deliver.
+#define MAX_GYRO_SAMPLE_DELAY 16
+
+typedef struct opticalflowDev_s {
+    unsigned delayMs;
+    int16_t minRangeCm;
+    uint8_t minQualityThreshold;
+    uint32_t gyroDelayUs;        // age of the gyro reading that matches the flow sample
+
+    opflowOpInitFunc  *init;
+    opflowOpUpdateFunc *update;
+    opflowOpReadFunc  *read;
+} opticalflowDev_t;

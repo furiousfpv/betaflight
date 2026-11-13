@@ -1,0 +1,70 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#include "platform.h"
+
+#ifdef USE_VIRTUAL_GPS
+
+#include "io/gps_virtual.h"
+
+static gpsSolutionData_t gpsVirtualData;
+static uint32_t updateCount = 0;
+
+void setVirtualGPS(double latitude, double longitude, double altiutude, double speed, double speed3D, double course, double velNorth, double velEast, double velDown)
+{
+    // May be called from a feeder thread (SITL UDP receive) while the GPS task
+    // reads on the main loop. Populate the struct fully first, then publish by
+    // release-storing the incremented counter: a reader that acquire-loads the
+    // new count is then guaranteed to see the complete data.
+    gpsVirtualData.numSat = 12;    // satellites_in_view
+    gpsVirtualData.acc.hAcc = 500; // horizontal_pos_accuracy - convert cm to mm
+    gpsVirtualData.acc.vAcc = 500; // vertical_pos_accuracy - convert cm to mm
+    gpsVirtualData.acc.sAcc = 400; // horizontal_vel_accuracy - convert cm to mm
+    gpsVirtualData.dop.pdop = 10; // hdop in 4.4 and earlier, pdop in 4.5 and above
+    gpsVirtualData.llh.lon = (int32_t)(longitude * GPS_DEGREES_DIVIDER);
+    gpsVirtualData.llh.lat = (int32_t)(latitude * GPS_DEGREES_DIVIDER);
+    gpsVirtualData.llh.altCm = (int32_t)(altiutude * 100.0); // alt, cm
+    gpsVirtualData.groundSpeed = (uint16_t)(speed * 100.0);  // cm/sec
+    gpsVirtualData.speed3d = (uint16_t)(speed3D * 100.0);    // cm/sec
+    gpsVirtualData.groundCourse = (uint16_t)(course * 10.0); // decidegrees
+    // The position estimator fuses NED velocity as a measurement; left
+    // zeroed it drags the velocity estimate toward zero during flight.
+    gpsVirtualData.velned.velN = (int16_t)(velNorth * 100.0); // cm/sec
+    gpsVirtualData.velned.velE = (int16_t)(velEast * 100.0);  // cm/sec
+    gpsVirtualData.velned.velD = (int16_t)(velDown * 100.0);  // cm/sec
+
+    const uint32_t next = __atomic_load_n(&updateCount, __ATOMIC_RELAXED) + 1;
+    __atomic_store_n(&updateCount, next, __ATOMIC_RELEASE);
+}
+
+void getVirtualGPS(gpsSolutionData_t *gpsSolData)
+{
+    *gpsSolData = gpsVirtualData;
+}
+
+uint32_t getVirtualGPSUpdateCount(void)
+{
+    return __atomic_load_n(&updateCount, __ATOMIC_ACQUIRE);
+}
+#endif

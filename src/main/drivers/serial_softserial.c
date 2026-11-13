@@ -1,22 +1,25 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 /*
- * Cleanflight (or Baseflight): original 
+ * Cleanflight (or Baseflight): original
  * jflyper: Mono-timer and single-wire half-duplex
  */
 
@@ -25,7 +28,7 @@
 
 #include "platform.h"
 
-#if defined(USE_SOFTSERIAL1) || defined(USE_SOFTSERIAL2)
+#if defined(USE_SOFTSERIAL)
 
 #include "build/build_config.h"
 #include "build/atomic.h"
@@ -34,24 +37,19 @@
 
 #include "common/utils.h"
 
+#include "io/serial.h"
+
 #include "drivers/nvic.h"
-#include "drivers/system.h"
 #include "drivers/io.h"
-#include "timer.h"
+#include "drivers/serial.h"
+#include "drivers/serial_impl.h"
+#include "drivers/timer.h"
+#include "drivers/timer_impl.h"
 
-#include "serial.h"
 #include "serial_softserial.h"
-
-#include "fc/config.h" //!!TODO remove this dependency
 
 #define RX_TOTAL_BITS 10
 #define TX_TOTAL_BITS 10
-
-#if defined(USE_SOFTSERIAL1) && defined(USE_SOFTSERIAL2)
-#define MAX_SOFTSERIAL_PORTS 2
-#else
-#define MAX_SOFTSERIAL_PORTS 1
-#endif
 
 typedef enum {
     TIMER_MODE_SINGLE,
@@ -68,9 +66,6 @@ typedef struct softSerial_s {
     IO_t txIO;
 
     const timerHardware_t *timerHardware;
-#ifdef USE_HAL_DRIVER
-    const TIM_HandleTypeDef *timerHandle;
-#endif
     const timerHardware_t *exTimerHardware;
 
     volatile uint8_t rxBuffer[SOFTSERIAL_BUFFER_SIZE];
@@ -91,48 +86,37 @@ typedef struct softSerial_s {
     uint16_t         transmissionErrors;
     uint16_t         receiveErrors;
 
-    uint8_t          softSerialPortIndex;
     timerMode_e      timerMode;
 
     timerOvrHandlerRec_t overCb;
-    timerCCHandlerRec_t edgeCb;
+    timerEdgeHandlerRec_t edgeCb;
 } softSerial_t;
 
 static const struct serialPortVTable softSerialVTable; // Forward
-
-static softSerial_t softSerialPorts[MAX_SOFTSERIAL_PORTS];
+// SERIAL_SOFTSERIAL_COUNT is fine, softserial ports must start from 1 and be continuous
+static softSerial_t softSerialPorts[SERIAL_SOFTSERIAL_COUNT];
 
 void onSerialTimerOverflow(timerOvrHandlerRec_t *cbRec, captureCompare_t capture);
-void onSerialRxPinChange(timerCCHandlerRec_t *cbRec, captureCompare_t capture);
+void onSerialRxPinChange(timerEdgeHandlerRec_t *cbRec, captureCompare_t capture);
 
-static void setTxSignal(softSerial_t *softSerial, uint8_t state)
+typedef enum { IDLE = ENABLE, MARK = DISABLE } SerialTxState_e;
+static void setTxSignal(softSerial_t *softSerial, SerialTxState_e state)
 {
-    if (softSerial->port.options & SERIAL_INVERTED) {
-        state = !state;
-    }
-
-    if (state) {
-        IOHi(softSerial->txIO);
-    } else {
-        IOLo(softSerial->txIO);
-    }
+    IOWrite(softSerial->txIO, (softSerial->port.options & SERIAL_INVERTED) ? !state : state);
 }
 
+static void serialEnableCC(softSerial_t *softSerial)
+{
+    timerChannelEnable(softSerial->timerHardware);
+}
+
+// switch to receive mode
 static void serialInputPortActivate(softSerial_t *softSerial)
 {
-    if (softSerial->port.options & SERIAL_INVERTED) {
-#ifdef STM32F1
-        IOConfigGPIO(softSerial->rxIO, IOCFG_IPD);
-#else
-        IOConfigGPIO(softSerial->rxIO, IOCFG_AF_PP_PD);
-#endif
-    } else {
-#ifdef STM32F1
-        IOConfigGPIO(softSerial->rxIO, IOCFG_IPU);
-#else
-        IOConfigGPIO(softSerial->rxIO, IOCFG_AF_PP_UP);
-#endif
-    }
+    const serialPullMode_t pull = serialOptions_pull(softSerial->port.options);
+    const uint8_t pinConfig = ((const uint8_t[]){IOCFG_AF_PP, IOCFG_AF_PP_PD, IOCFG_AF_PP_UP})[pull];
+    // softserial can easily support opendrain mode, but it is not implemented
+    IOConfigGPIOAF(softSerial->rxIO, pinConfig, softSerial->timerHardware->alternateFunction);
 
     softSerial->rxActive = true;
     softSerial->isSearchingForStartBit = true;
@@ -140,35 +124,35 @@ static void serialInputPortActivate(softSerial_t *softSerial)
 
     // Enable input capture
 
-#ifdef USE_HAL_DRIVER
-    TIM_CCxChannelCmd(softSerial->timerHardware->tim, softSerial->timerHardware->channel, TIM_CCx_ENABLE);
-#else
-    TIM_CCxCmd(softSerial->timerHardware->tim, softSerial->timerHardware->channel, TIM_CCx_Enable);
-#endif
+    serialEnableCC(softSerial);
 }
 
 static void serialInputPortDeActivate(softSerial_t *softSerial)
 {
     // Disable input capture
 
-#ifdef USE_HAL_DRIVER
-    TIM_CCxChannelCmd(softSerial->timerHardware->tim, softSerial->timerHardware->channel, TIM_CCx_DISABLE);
-#else
-    TIM_CCxCmd(softSerial->timerHardware->tim, softSerial->timerHardware->channel, TIM_CCx_Disable);
-#endif
-
-    IOConfigGPIO(softSerial->rxIO, IOCFG_IN_FLOATING);
+    timerChannelDisable(softSerial->timerHardware);
+    IOConfigGPIO(softSerial->rxIO, IOCFG_IN_FLOATING); // leave AF mode; serialOutputPortActivate will follow immediately
     softSerial->rxActive = false;
 }
 
 static void serialOutputPortActivate(softSerial_t *softSerial)
 {
-    IOConfigGPIO(softSerial->txIO, IOCFG_OUT_PP);
+    if (softSerial->exTimerHardware) {
+        IOConfigGPIOAF(softSerial->txIO, IOCFG_OUT_PP, softSerial->exTimerHardware->alternateFunction);
+    } else {
+        IOConfigGPIO(softSerial->txIO, IOCFG_OUT_PP);
+    }
 }
 
 static void serialOutputPortDeActivate(softSerial_t *softSerial)
 {
-    IOConfigGPIO(softSerial->txIO, IOCFG_IN_FLOATING);
+    if (softSerial->exTimerHardware) {
+        // TODO: there in no AF associated with input port
+        IOConfigGPIOAF(softSerial->txIO, IOCFG_IN_FLOATING, softSerial->exTimerHardware->alternateFunction);
+    } else {
+        IOConfigGPIO(softSerial->txIO, IOCFG_IN_FLOATING);
+    }
 }
 
 static bool isTimerPeriodTooLarge(uint32_t timerPeriod)
@@ -178,42 +162,15 @@ static bool isTimerPeriodTooLarge(uint32_t timerPeriod)
 
 static void serialTimerConfigureTimebase(const timerHardware_t *timerHardwarePtr, uint32_t baud)
 {
-    uint32_t baseClock = SystemCoreClock / timerClockDivisor(timerHardwarePtr->tim);
+    uint32_t baseClock = timerClock(timerHardwarePtr);
     uint32_t clock = baseClock;
     uint32_t timerPeriod;
 
-    do {
-        timerPeriod = clock / baud;
-        if (isTimerPeriodTooLarge(timerPeriod)) {
-            if (clock > 1) {
-                clock = clock / 2;   // this is wrong - mhz stays the same ... This will double baudrate until ok (but minimum baudrate is < 1200)
-            } else {
-                // TODO unable to continue, unable to determine clock and timerPeriods for the given baud
-            }
-
-        }
-    } while (isTimerPeriodTooLarge(timerPeriod));
-
-    uint8_t mhz = baseClock / 1000000;
-
-    timerConfigure(timerHardwarePtr, timerPeriod, mhz);
+    while (timerPeriod = clock / baud, isTimerPeriodTooLarge(timerPeriod) && clock > 1) {
+        clock = clock / 2;   // minimum baudrate is < 1200
+    }
+    timerConfigure(timerHardwarePtr, timerPeriod, clock);
 }
-
-#if 0
-static void serialICConfig(TIM_TypeDef *tim, uint8_t channel, uint16_t polarity)
-{
-    TIM_ICInitTypeDef TIM_ICInitStructure;
-
-    TIM_ICStructInit(&TIM_ICInitStructure);
-    TIM_ICInitStructure.TIM_Channel = channel;
-    TIM_ICInitStructure.TIM_ICPolarity = polarity;
-    TIM_ICInitStructure.TIM_ICSelection = TIM_ICSelection_DirectTI;
-    TIM_ICInitStructure.TIM_ICPrescaler = TIM_ICPSC_DIV1;
-    TIM_ICInitStructure.TIM_ICFilter = 0x0;
-
-    TIM_ICInit(tim, &TIM_ICInitStructure);
-}
-#endif
 
 static void resetBuffers(softSerial_t *softSerial)
 {
@@ -228,17 +185,32 @@ static void resetBuffers(softSerial_t *softSerial)
     softSerial->port.txBufferHead = 0;
 }
 
-serialPort_t *openSoftSerial(softSerialPortIndex_e portIndex, serialReceiveCallbackPtr rxCallback, uint32_t baud, portMode_t mode, portOptions_t options)
+static softSerial_t* softSerialFromIdentifier(serialPortIdentifier_e identifier)
 {
-    softSerial_t *softSerial = &(softSerialPorts[portIndex]);
+    if (identifier >= SERIAL_PORT_SOFTSERIAL_FIRST && identifier < SERIAL_PORT_SOFTSERIAL_FIRST + SERIAL_SOFTSERIAL_COUNT) {
+        return &softSerialPorts[identifier - SERIAL_PORT_SOFTSERIAL_FIRST];
+    }
+    return NULL;
+}
 
-    int pinCfgIndex = portIndex + RESOURCE_SOFT_OFFSET;
+serialPort_t *softSerialOpen(serialPortIdentifier_e identifier, serialReceiveCallbackPtr rxCallback, void *rxCallbackData, uint32_t baud, portMode_e mode, portOptions_e options)
+{
+    softSerial_t *softSerial = softSerialFromIdentifier(identifier);
+    if (!softSerial) {
+        return NULL;
+    }
+    // fill identifier early, so initialization code can use it
+    softSerial->port.identifier = identifier;
 
-    ioTag_t tagRx = serialPinConfig()->ioTagRx[pinCfgIndex];
-    ioTag_t tagTx = serialPinConfig()->ioTagTx[pinCfgIndex];
+    const int resourceIndex = serialResourceIndex(identifier);
+    const resourceOwner_e ownerTxRx = serialOwnerTxRx(identifier); // rx is always +1
+    const int ownerIndex = serialOwnerIndex(identifier);
 
-    const timerHardware_t *timerRx = timerGetByTag(tagRx, TIM_USE_ANY);
-    const timerHardware_t *timerTx = timerGetByTag(tagTx, TIM_USE_ANY);
+    const ioTag_t tagRx = serialPinConfig()->ioTagRx[resourceIndex];
+    const ioTag_t tagTx = serialPinConfig()->ioTagTx[resourceIndex];
+
+    const timerHardware_t *timerTx = timerAllocate(tagTx, ownerTxRx, ownerIndex);
+    const timerHardware_t *timerRx = (tagTx == tagRx) ? timerTx : timerAllocate(tagRx, ownerTxRx + 1, ownerIndex);
 
     IO_t rxIO = IOGetByTag(tagRx);
     IO_t txIO = IOGetByTag(tagTx);
@@ -246,42 +218,48 @@ serialPort_t *openSoftSerial(softSerialPortIndex_e portIndex, serialReceiveCallb
     if (options & SERIAL_BIDIR) {
         // If RX and TX pins are both assigned, we CAN use either with a timer.
         // However, for consistency with hardware UARTs, we only use TX pin,
-        // and this pin must have a timer.
-        if (!timerTx)
+        // and this pin must have a timer, and it must not be N-Channel.
+        if (!timerTx || (timerTx->output & TIMER_OUTPUT_N_CHANNEL)) {
             return NULL;
+        }
 
         softSerial->timerHardware = timerTx;
         softSerial->txIO = txIO;
         softSerial->rxIO = txIO;
-        IOInit(txIO, OWNER_SERIAL_TX, RESOURCE_INDEX(portIndex) + RESOURCE_SOFT_OFFSET);
+        IOInit(txIO, ownerTxRx, ownerIndex);
     } else {
         if (mode & MODE_RX) {
-            // Need a pin & a timer on RX
-            if (!(tagRx && timerRx))
+            // Need a pin & a timer on RX. Channel must not be N-Channel.
+            if (!timerRx || (timerRx->output & TIMER_OUTPUT_N_CHANNEL)) {
                 return NULL;
+            }
 
             softSerial->rxIO = rxIO;
             softSerial->timerHardware = timerRx;
-            IOInit(rxIO, OWNER_SERIAL_RX, RESOURCE_INDEX(portIndex) + RESOURCE_SOFT_OFFSET);
+            if (!((mode & MODE_TX) && rxIO == txIO)) {
+                // RX only on pin
+                IOInit(rxIO, ownerTxRx + 1, ownerIndex);
+            }
         }
 
         if (mode & MODE_TX) {
             // Need a pin on TX
-            if (!tagTx)
+            if (!txIO)
                 return NULL;
 
             softSerial->txIO = txIO;
 
             if (!(mode & MODE_RX)) {
                 // TX Simplex, must have a timer
-                if (!timerTx)
+                if (!timerTx) {
                     return NULL;
+                }
                 softSerial->timerHardware = timerTx;
             } else {
-                // Duplex
+                // Duplex, use timerTx if available
                 softSerial->exTimerHardware = timerTx;
             }
-            IOInit(txIO, OWNER_SERIAL_TX, RESOURCE_INDEX(portIndex) + RESOURCE_SOFT_OFFSET);
+            IOInit(txIO, ownerTxRx, ownerIndex);
         }
     }
 
@@ -290,10 +268,9 @@ serialPort_t *openSoftSerial(softSerialPortIndex_e portIndex, serialReceiveCallb
     softSerial->port.mode = mode;
     softSerial->port.options = options;
     softSerial->port.rxCallback = rxCallback;
+    softSerial->port.rxCallbackData = rxCallbackData;
 
     resetBuffers(softSerial);
-
-    softSerial->softSerialPortIndex = portIndex;
 
     softSerial->transmissionErrors = 0;
     softSerial->receiveErrors = 0;
@@ -304,11 +281,11 @@ serialPort_t *openSoftSerial(softSerialPortIndex_e portIndex, serialReceiveCallb
     // Configure master timer (on RX); time base and input capture
 
     serialTimerConfigureTimebase(softSerial->timerHardware, baud);
-    timerChConfigIC(softSerial->timerHardware, (options & SERIAL_INVERTED) ? ICPOLARITY_RISING : ICPOLARITY_FALLING, 0);
+    timerChannelConfigInput(softSerial->timerHardware, (options & SERIAL_INVERTED) ? ICPOLARITY_RISING : ICPOLARITY_FALLING, 0);
 
     // Initialize callbacks
-    timerChCCHandlerInit(&softSerial->edgeCb, onSerialRxPinChange);
-    timerChOvrHandlerInit(&softSerial->overCb, onSerialTimerOverflow);
+    timerChannelEdgeHandlerInit(&softSerial->edgeCb, onSerialRxPinChange);
+    timerChannelOverflowHandlerInit(&softSerial->overCb, onSerialTimerOverflow);
 
     // Configure bit clock interrupt & handler.
     // If we have an extra timer (on TX), it is initialized and configured
@@ -318,20 +295,16 @@ serialPort_t *openSoftSerial(softSerialPortIndex_e portIndex, serialReceiveCallb
     if ((mode & MODE_TX) && softSerial->exTimerHardware && softSerial->exTimerHardware->tim != softSerial->timerHardware->tim) {
         softSerial->timerMode = TIMER_MODE_DUAL;
         serialTimerConfigureTimebase(softSerial->exTimerHardware, baud);
-        timerChConfigCallbacks(softSerial->exTimerHardware, NULL, &softSerial->overCb);
-        timerChConfigCallbacks(softSerial->timerHardware, &softSerial->edgeCb, NULL);
+        timerChannelConfigCallbacks(softSerial->exTimerHardware, NULL, &softSerial->overCb);
+        timerChannelConfigCallbacks(softSerial->timerHardware, &softSerial->edgeCb, NULL);
     } else {
         softSerial->timerMode = TIMER_MODE_SINGLE;
-        timerChConfigCallbacks(softSerial->timerHardware, &softSerial->edgeCb, &softSerial->overCb);
+        timerChannelConfigCallbacks(softSerial->timerHardware, &softSerial->edgeCb, &softSerial->overCb);
     }
-
-#ifdef USE_HAL_DRIVER
-    softSerial->timerHandle = timerFindTimerHandle(softSerial->timerHardware->tim);
-#endif
 
     if (!(options & SERIAL_BIDIR)) {
         serialOutputPortActivate(softSerial);
-        setTxSignal(softSerial, ENABLE);
+        setTxSignal(softSerial, IDLE);
     }
 
     serialInputPortActivate(softSerial);
@@ -339,21 +312,18 @@ serialPort_t *openSoftSerial(softSerialPortIndex_e portIndex, serialReceiveCallb
     return &softSerial->port;
 }
 
-
 /*
  * Serial Engine
  */
 
-void processTxState(softSerial_t *softSerial)
+static void processTxState(softSerial_t *softSerial)
 {
-    uint8_t mask;
-
     if (!softSerial->isTransmittingData) {
         if (isSoftSerialTransmitBufferEmpty((serialPort_t *)softSerial)) {
             // Transmit buffer empty.
-            // Start listening if not already in if half-duplex
+            // Switch to RX mode if not already listening and running in half-duplex mode
             if (!softSerial->rxActive && softSerial->port.options & SERIAL_BIDIR) {
-                serialOutputPortDeActivate(softSerial);
+                serialOutputPortDeActivate(softSerial); // TODO: not necessary
                 serialInputPortActivate(softSerial);
             }
             return;
@@ -366,7 +336,7 @@ void processTxState(softSerial_t *softSerial)
         }
 
         // build internal buffer, MSB = Stop Bit (1) + data bits (MSB to LSB) + start bit(0) LSB
-        softSerial->internalTxBuffer = (1 << (TX_TOTAL_BITS - 1)) | (byteToSend << 1);
+        softSerial->internalTxBuffer = (1 << (TX_TOTAL_BITS - 1)) | (byteToSend << 1) | 0;
         softSerial->bitsLeftToTransmit = TX_TOTAL_BITS;
         softSerial->isTransmittingData = true;
 
@@ -374,16 +344,23 @@ void processTxState(softSerial_t *softSerial)
             // Half-duplex: Deactivate receiver, activate transmitter
             serialInputPortDeActivate(softSerial);
             serialOutputPortActivate(softSerial);
-        }
 
-        return;
+            // Start sending on next bit timing, as port manipulation takes time,
+            // and continuing here may cause bit period to decrease causing sampling errors
+            // at the receiver under high rates.
+            // Note that there will be (little less than) 1-bit delay; take it as "turn around time".
+            // This time is important in noninverted pulldown bidir mode (SmartAudio).
+            //   During this period, TX pin is in IDLE state so next startbit (MARK) can be detected
+            // XXX Otherwise, we may be able to reload counter and continue. (Future work.)
+            return;
+        }
     }
 
     if (softSerial->bitsLeftToTransmit) {
-        mask = softSerial->internalTxBuffer & 1;
+        const bool bit = softSerial->internalTxBuffer & 1;
         softSerial->internalTxBuffer >>= 1;
 
-        setTxSignal(softSerial, mask);
+        setTxSignal(softSerial, bit);
         softSerial->bitsLeftToTransmit--;
         return;
     }
@@ -396,31 +373,31 @@ enum {
     LEADING
 };
 
-void applyChangedBits(softSerial_t *softSerial)
+static void applyChangedBits(softSerial_t *softSerial)
 {
     if (softSerial->rxEdge == TRAILING) {
-        uint8_t bitToSet;
-        for (bitToSet = softSerial->rxLastLeadingEdgeAtBitIndex; bitToSet < softSerial->rxBitIndex; bitToSet++) {
+        for (unsigned bitToSet = softSerial->rxLastLeadingEdgeAtBitIndex; bitToSet < softSerial->rxBitIndex; bitToSet++) {
             softSerial->internalRxBuffer |= 1 << bitToSet;
         }
     }
 }
 
-void prepareForNextRxByte(softSerial_t *softSerial)
+static void prepareForNextRxByte(softSerial_t *softSerial)
 {
     // prepare for next byte
     softSerial->rxBitIndex = 0;
     softSerial->isSearchingForStartBit = true;
     if (softSerial->rxEdge == LEADING) {
         softSerial->rxEdge = TRAILING;
-        timerChConfigIC(softSerial->timerHardware, (softSerial->port.options & SERIAL_INVERTED) ? ICPOLARITY_RISING : ICPOLARITY_FALLING, 0);
+        timerChannelConfigInput(softSerial->timerHardware, (softSerial->port.options & SERIAL_INVERTED) ? ICPOLARITY_RISING : ICPOLARITY_FALLING, 0);
+        serialEnableCC(softSerial);
     }
 }
 
 #define STOP_BIT_MASK (1 << 0)
 #define START_BIT_MASK (1 << (RX_TOTAL_BITS - 1))
 
-void extractAndStoreRxByte(softSerial_t *softSerial)
+static void extractAndStoreRxByte(softSerial_t *softSerial)
 {
     if ((softSerial->port.mode & MODE_RX) == 0) {
         return;
@@ -437,14 +414,14 @@ void extractAndStoreRxByte(softSerial_t *softSerial)
     uint8_t rxByte = (softSerial->internalRxBuffer >> 1) & 0xFF;
 
     if (softSerial->port.rxCallback) {
-        softSerial->port.rxCallback(rxByte);
+        softSerial->port.rxCallback(rxByte, softSerial->port.rxCallbackData);
     } else {
         softSerial->port.rxBuffer[softSerial->port.rxBufferHead] = rxByte;
         softSerial->port.rxBufferHead = (softSerial->port.rxBufferHead + 1) % softSerial->port.rxBufferSize;
     }
 }
 
-void processRxState(softSerial_t *softSerial)
+static void processRxState(softSerial_t *softSerial)
 {
     if (softSerial->isSearchingForStartBit) {
         return;
@@ -480,26 +457,23 @@ void onSerialTimerOverflow(timerOvrHandlerRec_t *cbRec, captureCompare_t capture
         processRxState(self);
 }
 
-void onSerialRxPinChange(timerCCHandlerRec_t *cbRec, captureCompare_t capture)
+void onSerialRxPinChange(timerEdgeHandlerRec_t *cbRec, captureCompare_t capture)
 {
     UNUSED(capture);
 
     softSerial_t *self = container_of(cbRec, softSerial_t, edgeCb);
-    bool inverted = self->port.options & SERIAL_INVERTED;
 
     if ((self->port.mode & MODE_RX) == 0) {
         return;
     }
 
+    const bool inverted = self->port.options & SERIAL_INVERTED;
+
     if (self->isSearchingForStartBit) {
         // Synchronize the bit timing so that it will interrupt at the center
         // of the bit period.
 
-#ifdef USE_HAL_DRIVER
-        __HAL_TIM_SetCounter(self->timerHandle, __HAL_TIM_GetAutoreload(self->timerHandle) / 2);
-#else
-        TIM_SetCounter(self->timerHardware->tim, self->timerHardware->tim->ARR / 2);
-#endif
+        timerSetCounter(self->timerHardware, timerGetPeriod(self->timerHardware) / 2);
 
         // For a mono-timer full duplex configuration, this may clobber the
         // transmission because the next callback to the onSerialTimerOverflow
@@ -510,7 +484,8 @@ void onSerialRxPinChange(timerCCHandlerRec_t *cbRec, captureCompare_t capture)
             self->transmissionErrors++;
         }
 
-        timerChConfigIC(self->timerHardware, inverted ? ICPOLARITY_FALLING : ICPOLARITY_RISING, 0);
+        timerChannelConfigInput(self->timerHardware, inverted ? ICPOLARITY_FALLING : ICPOLARITY_RISING, 0);
+        serialEnableCC(self);
         self->rxEdge = LEADING;
 
         self->rxBitIndex = 0;
@@ -528,13 +503,13 @@ void onSerialRxPinChange(timerCCHandlerRec_t *cbRec, captureCompare_t capture)
 
     if (self->rxEdge == TRAILING) {
         self->rxEdge = LEADING;
-        timerChConfigIC(self->timerHardware, inverted ? ICPOLARITY_FALLING : ICPOLARITY_RISING, 0);
+        timerChannelConfigInput(self->timerHardware, inverted ? ICPOLARITY_FALLING : ICPOLARITY_RISING, 0);
     } else {
         self->rxEdge = TRAILING;
-        timerChConfigIC(self->timerHardware, inverted ? ICPOLARITY_RISING : ICPOLARITY_FALLING, 0);
+        timerChannelConfigInput(self->timerHardware, inverted ? ICPOLARITY_RISING : ICPOLARITY_FALLING, 0);
     }
+    serialEnableCC(self);
 }
-
 
 /*
  * Standard serial driver API
@@ -600,7 +575,7 @@ void softSerialSetBaudRate(serialPort_t *s, uint32_t baudRate)
     serialTimerConfigureTimebase(softSerial->timerHardware, baudRate);
 }
 
-void softSerialSetMode(serialPort_t *instance, portMode_t mode)
+static void softSerialSetMode(serialPort_t *instance, portMode_e mode)
 {
     instance->mode = mode;
 }
@@ -618,6 +593,8 @@ static const struct serialPortVTable softSerialVTable = {
     .serialSetBaudRate = softSerialSetBaudRate,
     .isSerialTransmitBufferEmpty = isSoftSerialTransmitBufferEmpty,
     .setMode = softSerialSetMode,
+    .setCtrlLineStateCb = NULL,
+    .setBaudRateCb = NULL,
     .writeBuf = NULL,
     .beginWrite = NULL,
     .endWrite = NULL

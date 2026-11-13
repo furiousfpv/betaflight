@@ -1,0 +1,82 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <stdint.h>
+#include <stdbool.h>
+
+#include "pg/pg.h"
+
+#ifndef MAX_WAYPOINTS
+#define MAX_WAYPOINTS 30
+#endif
+
+_Static_assert(MAX_WAYPOINTS <= 255, "MAX_WAYPOINTS exceeds uint8_t waypointCount range");
+
+typedef enum {
+    WAYPOINT_TYPE_FLYOVER = 0,
+    WAYPOINT_TYPE_FLYBY,
+    WAYPOINT_TYPE_HOLD,
+    WAYPOINT_TYPE_LAND,
+    WAYPOINT_TYPE_TAKEOFF,
+    // Modifier types — no positional dispatch; mutate executor state and the
+    // dispatch loop drains them onto the next positional waypoint.
+    WAYPOINT_TYPE_ALT_CHANGE,
+    WAYPOINT_TYPE_DELAY,
+    WAYPOINT_TYPE_YAW_RATE,
+    WAYPOINT_TYPE_COUNT
+} waypointType_e;
+
+typedef enum {
+    WAYPOINT_PATTERN_NONE = 0,      // station-keep at the hold point
+    WAYPOINT_PATTERN_ORBIT,
+    WAYPOINT_PATTERN_FIGURE8,
+    WAYPOINT_PATTERN_COUNT
+} waypointPattern_e;
+
+typedef enum {
+    WAYPOINT_YAW_DEFAULT = 0,   // the configured autopilot yaw mode owns the nose
+    WAYPOINT_YAW_FACE_TARGET,   // point at this waypoint, and do not translate until aligned
+    WAYPOINT_YAW_FACE_NEXT,     // point at the next positional waypoint (turn while climbing)
+    WAYPOINT_YAW_HOLD,          // hold the heading captured when the leg is dispatched
+    WAYPOINT_YAW_COUNT
+} waypointYaw_e;
+
+typedef struct {
+    int32_t latitude;       // Latitude in degrees * 10^7 (7 decimal places, ±90.0000000)
+    int32_t longitude;      // Longitude in degrees * 10^7 (7 decimal places, ±180.0000000)
+    int32_t altitude;       // Altitude in centimeters AMSL (above mean sea level, negative values permitted); on a
+                            // fixed wing's LAND waypoint, the elevation of the ground it touches down on
+    uint16_t speed;         // Horizontal speed in cm/s (0 = autopilot maxVelocity)
+    uint16_t duration;      // Duration in deciseconds (0.1s)
+    uint16_t vertRate;      // Climb and descent rate in cm/s (0 = the configured alt hold climb rate, or landingDescentRate on a LAND leg)
+    uint8_t type;           // waypointType_e
+    uint8_t pattern;        // waypointPattern_e (for hold type)
+    uint8_t yawBehaviour;   // waypointYaw_e
+} waypoint_t;
+
+typedef struct {
+    uint8_t waypointCount;
+    waypoint_t waypoints[MAX_WAYPOINTS];
+} flightPlanConfig_t;
+
+PG_DECLARE(flightPlanConfig_t, flightPlanConfig);

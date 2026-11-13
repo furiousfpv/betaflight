@@ -1,23 +1,26 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #pragma once
 
-typedef enum FlightLogFieldCondition {
+typedef enum {
     FLIGHT_LOG_FIELD_CONDITION_ALWAYS = 0,
     FLIGHT_LOG_FIELD_CONDITION_AT_LEAST_MOTORS_1,
     FLIGHT_LOG_FIELD_CONDITION_AT_LEAST_MOTORS_2,
@@ -29,29 +32,78 @@ typedef enum FlightLogFieldCondition {
     FLIGHT_LOG_FIELD_CONDITION_AT_LEAST_MOTORS_8,
     FLIGHT_LOG_FIELD_CONDITION_TRICOPTER,
 
+#ifdef USE_DSHOT_TELEMETRY
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_1_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_2_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_3_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_4_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_5_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_6_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_7_HAS_RPM,
+    FLIGHT_LOG_FIELD_CONDITION_MOTOR_8_HAS_RPM,
+#endif
+
+#ifdef USE_SERVOS
+    FLIGHT_LOG_FIELD_CONDITION_SERVOS,
+#endif
+
     FLIGHT_LOG_FIELD_CONDITION_MAG,
     FLIGHT_LOG_FIELD_CONDITION_BARO,
     FLIGHT_LOG_FIELD_CONDITION_VBAT,
     FLIGHT_LOG_FIELD_CONDITION_AMPERAGE_ADC,
-    FLIGHT_LOG_FIELD_CONDITION_SONAR,
+    FLIGHT_LOG_FIELD_CONDITION_RANGEFINDER,
     FLIGHT_LOG_FIELD_CONDITION_RSSI,
 
+    FLIGHT_LOG_FIELD_CONDITION_PID,
     FLIGHT_LOG_FIELD_CONDITION_NONZERO_PID_D_0,
     FLIGHT_LOG_FIELD_CONDITION_NONZERO_PID_D_1,
     FLIGHT_LOG_FIELD_CONDITION_NONZERO_PID_D_2,
 
+#ifdef USE_WING
+    FLIGHT_LOG_FIELD_CONDITION_NONZERO_WING_S_0,
+    FLIGHT_LOG_FIELD_CONDITION_NONZERO_WING_S_1,
+    FLIGHT_LOG_FIELD_CONDITION_NONZERO_WING_S_2,
+#endif
+
+    FLIGHT_LOG_FIELD_CONDITION_RC_COMMANDS,
+    FLIGHT_LOG_FIELD_CONDITION_SETPOINT,
+
     FLIGHT_LOG_FIELD_CONDITION_NOT_LOGGING_EVERY_FRAME,
 
+    FLIGHT_LOG_FIELD_CONDITION_GYRO,
+    FLIGHT_LOG_FIELD_CONDITION_GYROUNFILT,
     FLIGHT_LOG_FIELD_CONDITION_ACC,
-    FLIGHT_LOG_FIELD_CONDITION_DEBUG,
-
+    FLIGHT_LOG_FIELD_CONDITION_DEBUG_LOG,
+    FLIGHT_LOG_FIELD_CONDITION_ATTITUDE,
+    FLIGHT_LOG_FIELD_CONDITION_PITOT,
     FLIGHT_LOG_FIELD_CONDITION_NEVER,
 
     FLIGHT_LOG_FIELD_CONDITION_FIRST = FLIGHT_LOG_FIELD_CONDITION_ALWAYS,
     FLIGHT_LOG_FIELD_CONDITION_LAST = FLIGHT_LOG_FIELD_CONDITION_NEVER
-} FlightLogFieldCondition;
+} flightLogFieldCondition_e;
 
-typedef enum FlightLogFieldPredictor {
+typedef enum { // no more than 32
+    FLIGHT_LOG_FIELD_SELECT_PID = 0,
+    FLIGHT_LOG_FIELD_SELECT_RC_COMMANDS,
+    FLIGHT_LOG_FIELD_SELECT_SETPOINT,
+    FLIGHT_LOG_FIELD_SELECT_BATTERY,
+    FLIGHT_LOG_FIELD_SELECT_MAG,
+    FLIGHT_LOG_FIELD_SELECT_ALTITUDE,
+    FLIGHT_LOG_FIELD_SELECT_RSSI,
+    FLIGHT_LOG_FIELD_SELECT_GYRO,
+    FLIGHT_LOG_FIELD_SELECT_ATTITUDE,
+    FLIGHT_LOG_FIELD_SELECT_ACC,
+    FLIGHT_LOG_FIELD_SELECT_DEBUG_LOG,
+    FLIGHT_LOG_FIELD_SELECT_MOTOR,
+    FLIGHT_LOG_FIELD_SELECT_GPS,
+    FLIGHT_LOG_FIELD_SELECT_RPM,
+    FLIGHT_LOG_FIELD_SELECT_GYROUNFILT,
+    FLIGHT_LOG_FIELD_SELECT_SERVO,
+    FLIGHT_LOG_FIELD_SELECT_PITOT,
+    FLIGHT_LOG_FIELD_SELECT_COUNT
+} flightLogFieldSelect_e;
+
+typedef enum {
     //No prediction:
     FLIGHT_LOG_FIELD_PREDICTOR_0              = 0,
 
@@ -88,34 +140,31 @@ typedef enum FlightLogFieldPredictor {
     //Predict that this field is the minimum motor output
     FLIGHT_LOG_FIELD_PREDICTOR_MINMOTOR       = 11
 
-} FlightLogFieldPredictor;
+} flightLogFieldPredictor_e;
 
-typedef enum FlightLogFieldEncoding {
+typedef enum {
     FLIGHT_LOG_FIELD_ENCODING_SIGNED_VB       = 0, // Signed variable-byte
     FLIGHT_LOG_FIELD_ENCODING_UNSIGNED_VB     = 1, // Unsigned variable-byte
     FLIGHT_LOG_FIELD_ENCODING_NEG_14BIT       = 3, // Unsigned variable-byte but we negate the value before storing, value is 14 bits
     FLIGHT_LOG_FIELD_ENCODING_TAG8_8SVB       = 6,
     FLIGHT_LOG_FIELD_ENCODING_TAG2_3S32       = 7,
     FLIGHT_LOG_FIELD_ENCODING_TAG8_4S16       = 8,
-    FLIGHT_LOG_FIELD_ENCODING_NULL            = 9 // Nothing is written to the file, take value to be zero
-} FlightLogFieldEncoding;
+    FLIGHT_LOG_FIELD_ENCODING_NULL            = 9, // Nothing is written to the file, take value to be zero
+    FLIGHT_LOG_FIELD_ENCODING_TAG2_3SVARIABLE = 10
+} flightLogFieldEncoding_e;
 
-typedef enum FlightLogFieldSign {
+typedef enum {
     FLIGHT_LOG_FIELD_UNSIGNED = 0,
     FLIGHT_LOG_FIELD_SIGNED   = 1
-} FlightLogFieldSign;
-
-typedef enum FlightLogEvent {
-    FLIGHT_LOG_EVENT_SYNC_BEEP = 0,
-    FLIGHT_LOG_EVENT_INFLIGHT_ADJUSTMENT = 13,
-    FLIGHT_LOG_EVENT_LOGGING_RESUME = 14,
-    FLIGHT_LOG_EVENT_FLIGHTMODE = 30, // Add new event type for flight mode status.
-    FLIGHT_LOG_EVENT_LOG_END = 255
-} FlightLogEvent;
+} flightLogFieldSign_e;
 
 typedef struct flightLogEvent_syncBeep_s {
     uint32_t time;
 } flightLogEvent_syncBeep_t;
+
+typedef struct flightLogEvent_disarm_s {
+    uint32_t reason;
+} flightLogEvent_disarm_t;
 
 typedef struct flightLogEvent_flightMode_s { // New Event Data type
     uint32_t flags;
@@ -123,10 +172,10 @@ typedef struct flightLogEvent_flightMode_s { // New Event Data type
 } flightLogEvent_flightMode_t;
 
 typedef struct flightLogEvent_inflightAdjustment_s {
-    uint8_t adjustmentFunction;
-    bool floatFlag;
     int32_t newValue;
     float newFloatValue;
+    uint8_t adjustmentFunction;
+    bool floatFlag;
 } flightLogEvent_inflightAdjustment_t;
 
 typedef struct flightLogEvent_loggingResume_s {
@@ -136,18 +185,12 @@ typedef struct flightLogEvent_loggingResume_s {
 
 #define FLIGHT_LOG_EVENT_INFLIGHT_ADJUSTMENT_FUNCTION_FLOAT_VALUE_FLAG 128
 
-typedef struct flightLogEvent_gtuneCycleResult_s {
-    uint8_t gtuneAxis;
-    int32_t gtuneGyroAVG;
-    int16_t gtuneNewP;
-} flightLogEvent_gtuneCycleResult_t;
-
 typedef union flightLogEventData_u {
     flightLogEvent_syncBeep_t syncBeep;
     flightLogEvent_flightMode_t flightMode; // New event data
+    flightLogEvent_disarm_t disarm;
     flightLogEvent_inflightAdjustment_t inflightAdjustment;
     flightLogEvent_loggingResume_t loggingResume;
-    flightLogEvent_gtuneCycleResult_t gtuneCycleResult;
 } flightLogEventData_t;
 
 typedef struct flightLogEvent_s {

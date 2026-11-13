@@ -1,0 +1,100 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <math.h>
+
+#include "common/axis.h"
+#include "common/vector.h"
+#include "common/time.h"
+
+#include "io/gps.h"
+
+// Unified position estimate from Kalman-filter sensor fusion.
+// All values in local ENU (East-North-Up) centimeters, zeroed at arm point.
+typedef struct positionEstimate3d_s {
+    vector3_t position;        // cm, ENU
+    vector3_t velocity;        // cm/s, ENU; the plain Kalman velocity on all three axes
+    vector3_t acceleration;    // cm/s^2, ENU
+    float trustXY;             // 0-1, derived from KF XY covariance
+    float trustZ;              // 0-1, derived from KF Z covariance
+    bool isValidXY;            // true if at least one XY measurement source active
+    bool isValidZ;             // true if at least one Z measurement source active
+} positionEstimate3d_t;
+
+static inline float positionEstimateGroundspeedCmS(const positionEstimate3d_t *est)
+{
+    return sqrtf(est->velocity.v[ENU_E] * est->velocity.v[ENU_E] + est->velocity.v[ENU_N] * est->velocity.v[ENU_N]);
+}
+
+// East and north of the arm point, metres.
+static inline vector2_t positionEstimateHorizontalM(const positionEstimate3d_t *est)
+{
+    vector2_t positionM;
+    positionM.x = est->position.v[ENU_E] * 0.01f;
+    positionM.y = est->position.v[ENU_N] * 0.01f;
+    return positionM;
+}
+
+// Consumers of the estimate that are scheduled by it. Each gets its own bit in
+// the pending-update mask so that one taking the event does not hide it from
+// the other.
+typedef enum {
+    POS_EST_CONSUMER_ALTHOLD = 0,
+    POS_EST_CONSUMER_POSHOLD,
+    POS_EST_CONSUMER_COUNT
+} positionEstimatorConsumer_e;
+
+void positionEstimatorInit(void);
+void positionEstimatorUpdate(void);
+
+// Event-driven scheduling hook: positionEstimatorUpdate() publishes one update
+// event per run, and each consumer takes it exactly once. Returns true if a new
+// estimate has been published since this consumer last took one, and clears the
+// consumer's flag.
+bool positionEstimatorTakeUpdate(positionEstimatorConsumer_e consumer);
+
+// Request XY fusion (normally automatic from armed state / sensors / modes).
+// May re-initialize kfEast/kfNorth when transitioning to enabled; disabling stops prediction only.
+void positionEstimatorEnableXY(bool enable);
+
+// Read the unified estimate
+const positionEstimate3d_t *positionEstimatorGetEstimate(void);
+
+float positionEstimatorGetAltitudeCm(void);
+float positionEstimatorGetVerticalVelocity(void);
+float positionEstimatorGetVerticalAcceleration(void);
+bool positionEstimatorIsValidXY(void);
+bool positionEstimatorIsValidZ(void);
+float positionEstimatorGetTrustXY(void);
+float positionEstimatorGetTrustZ(void);
+// True when GPS has a fix and is not excluded by positionSource config.
+// Use to decide whether heading validity is required before engaging position hold.
+bool positionEstimatorIsHeadingRequired(void);
+
+// Reset (e.g. on arm/disarm)
+void positionEstimatorResetZ(void);
+void positionEstimatorResetXY(void);
+
+// Returns the GPS location captured when XY estimation became active (arm point).
+// Returns false if no GPS origin has been captured yet.
+bool positionEstimatorGetGpsOrigin(gpsLocation_t *out);

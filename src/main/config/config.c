@@ -1,0 +1,923 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <string.h>
+#include <math.h>
+
+#include "platform.h"
+
+#include "blackbox/blackbox.h"
+
+#include "build/debug.h"
+
+#include "cli/cli.h"
+
+#include "common/sensor_alignment.h"
+
+#include "config/config_eeprom.h"
+#include "config/feature.h"
+
+#include "drivers/dshot.h"
+#include "drivers/dshot_command.h"
+#include "drivers/motor.h"
+#include "drivers/system.h"
+
+#include "fc/controlrate_profile.h"
+#include "fc/core.h"
+#include "fc/rc.h"
+#include "fc/rc_adjustments.h"
+#include "fc/rc_controls.h"
+#include "fc/runtime_config.h"
+
+#include "flight/failsafe.h"
+#include "flight/imu.h"
+#include "flight/mixer.h"
+#include "flight/pid.h"
+#include "flight/pid_init.h"
+#include "flight/rpm_filter.h"
+#include "flight/servos.h"
+#include "flight/position.h"
+
+#include "io/beeper.h"
+#include "io/displayport_msp.h"
+#include "io/gps.h"
+#include "io/ledstrip.h"
+#include "io/serial.h"
+#include "io/serial_feature_map.h"
+#include "io/vtx.h"
+
+#include "msp/msp_box.h"
+
+#include "osd/osd.h"
+
+#include "pg/adc.h"
+#include "pg/beeper.h"
+#include "pg/beeper_dev.h"
+#include "pg/displayport_profiles.h"
+#include "pg/gyrodev.h"
+#include "pg/motor.h"
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
+#include "pg/rx.h"
+#include "pg/rx_spi.h"
+#include "pg/sdcard.h"
+#include "pg/vtx_table.h"
+#if ENABLE_FLIGHT_PLAN
+#include "pg/flight_plan.h"
+#endif
+
+#include "rx/rx.h"
+#include "rx/rx_spi.h"
+
+#include "scheduler/scheduler.h"
+
+#include "sensors/acceleration.h"
+#include "sensors/battery.h"
+#include "sensors/compass.h"
+#include "sensors/esc_sensor.h"
+#include "sensors/gyro.h"
+
+#include "telemetry/telemetry.h"
+
+#include "config.h"
+
+static bool configIsDirty; /* someone indicated that the config is modified and it is not yet saved */
+
+static bool rebootRequired = false;  // set if a config change requires a reboot to take effect
+
+static bool eepromWriteInProgress = false;
+
+pidProfile_t *currentPidProfile;
+
+#ifndef RX_SPI_DEFAULT_PROTOCOL
+#define RX_SPI_DEFAULT_PROTOCOL 0
+#endif
+
+PG_REGISTER_WITH_RESET_TEMPLATE(systemConfig_t, systemConfig, PG_SYSTEM_CONFIG, 4);
+
+PG_RESET_TEMPLATE(systemConfig_t, systemConfig,
+    .pidProfileIndex = 0,
+    .activeRateProfile = 0,
+    .debug_mode = DEBUG_MODE,
+    .task_statistics = true,
+    .rateProfile6PosSwitch = false,
+    .cpu_overclock = DEFAULT_CPU_OVERCLOCK,
+    .powerOnArmingGraceTime = 5,
+    .boardIdentifier = TARGET_BOARD_IDENTIFIER,
+    .hseMhz = SYSTEM_HSE_MHZ,  // Only used for F4 and G4 targets
+    .configurationState = CONFIGURATION_STATE_UNCONFIGURED,
+    .enableStickArming = false,
+    .activeBatteryProfile = 0,
+);
+
+bool isEepromWriteInProgress(void)
+{
+    return eepromWriteInProgress;
+}
+
+uint8_t getCurrentPidProfileIndex(void)
+{
+    return systemConfig()->pidProfileIndex;
+}
+
+static void loadPidProfile(void)
+{
+    currentPidProfile = pidProfilesMutable(systemConfig()->pidProfileIndex);
+}
+
+uint8_t getCurrentControlRateProfileIndex(void)
+{
+    return systemConfig()->activeRateProfile;
+}
+
+// Returns the active battery profile index.
+uint8_t getCurrentBatteryProfileIndex(void)
+{
+    return systemConfig()->activeBatteryProfile;
+}
+
+void resetConfig(void)
+{
+    pgResetAll();
+
+#if defined(USE_TARGET_CONFIG)
+    targetConfiguration();
+#endif
+}
+
+static void activateConfig(void)
+{
+    loadPidProfile();
+    loadControlRateProfile();
+    loadBatteryProfile();
+
+    activeAdjustmentRangeReset();
+
+    pidInit(currentPidProfile);
+
+    // after pidInit(): initRcProcessing() latches feedforward settings from pidRuntime
+    initRcProcessing();
+
+    rcControlsInit();
+
+    failsafeReset();
+#ifdef USE_ACC
+    setAccelerationTrims(&accelerometerConfigMutable()->accZero);
+    accInitFilters();
+#endif
+
+    imuConfigure(throttleCorrectionConfig()->throttle_correction_angle, throttleCorrectionConfig()->throttle_correction_value);
+
+#if defined(USE_LED_STRIP_STATUS_MODE)
+    reevaluateLedConfig();
+#endif
+
+    initActiveBoxIds();
+}
+
+static void adjustFilterLimit(uint16_t *parm, uint16_t resetValue)
+{
+    if (*parm > LPF_MAX_HZ) {
+        *parm = resetValue;
+    }
+}
+
+static void validateAndFixRatesSettings(void)
+{
+    for (unsigned profileIndex = 0; profileIndex < CONTROL_RATE_PROFILE_COUNT; profileIndex++) {
+        const ratesType_e ratesType = controlRateProfilesMutable(profileIndex)->rates_type;
+        for (unsigned axis = FD_ROLL; axis <= FD_YAW; axis++) {
+            controlRateProfilesMutable(profileIndex)->rcRates[axis] = constrain(controlRateProfilesMutable(profileIndex)->rcRates[axis], 0, ratesSettingLimits[ratesType].rc_rate_limit);
+            controlRateProfilesMutable(profileIndex)->rates[axis] = constrain(controlRateProfilesMutable(profileIndex)->rates[axis], 0, ratesSettingLimits[ratesType].srate_limit);
+            controlRateProfilesMutable(profileIndex)->rcExpo[axis] = constrain(controlRateProfilesMutable(profileIndex)->rcExpo[axis], 0, ratesSettingLimits[ratesType].expo_limit);
+        }
+    }
+}
+
+static void validateAndFixConfig(void)
+{
+#if !defined(USE_QUAD_MIXER_ONLY)
+    // Reset unsupported mixer mode to default.
+    // This check will be gone when motor/servo mixers are loaded dynamically
+    // by configurator as a part of configuration procedure.
+
+    mixerMode_e mixerMode = mixerConfigMutable()->mixerMode;
+
+    if (!(mixerMode == MIXER_CUSTOM || mixerMode == MIXER_CUSTOM_AIRPLANE || mixerMode == MIXER_CUSTOM_TRI)) {
+        if (mixers[mixerMode].motorCount && mixers[mixerMode].motor == NULL)
+            mixerConfigMutable()->mixerMode = MIXER_CUSTOM;
+#ifdef USE_SERVOS
+        if (mixers[mixerMode].useServo && servoMixers[mixerMode].servoRuleCount == 0)
+            mixerConfigMutable()->mixerMode = MIXER_CUSTOM_AIRPLANE;
+#endif
+    }
+#endif
+
+#ifdef USE_TELEMETRY
+    telemetryValidateProviders();
+#endif
+
+    if (rxConfig()->mincheck > RX_MIN_CHECK_MAX) {
+        rxConfigMutable()->mincheck = RX_MIN_CHECK_MAX;
+    }
+
+    if (rxConfig()->mincheck >= rxConfig()->maxcheck) {
+        rxConfigMutable()->mincheck = RX_MIN_CHECK_DEFAULT;
+        rxConfigMutable()->maxcheck = RX_MAX_CHECK_DEFAULT;
+    }
+
+    if (rxConfig()->rx_min_usec >= rxConfig()->rx_max_usec) {
+        rxConfigMutable()->rx_min_usec = RX_MIN_USEC;
+        rxConfigMutable()->rx_max_usec = RX_MAX_USEC;
+    }
+
+    if (!isSerialConfigValid()) {
+        // Give up only the claims that actually clash before falling back to the
+        // board-wide reset, which would cost the user every other port they had
+        // assigned to settle a single bad one.
+        serialDropConflictingAssignments();
+
+        const bool serialReset = !isSerialConfigValid();
+        if (serialReset) {
+            serialResetFeatureAssignments();
+        }
+
+        systemConfigMutable()->configResetReason = CONFIG_RESET_SERIAL;
+        systemConfigMutable()->configResetDetail = serialReset;
+    }
+
+#if defined(USE_GPS)
+    const serialPortIdentifier_e gpsSerial = gpsConfig()->gps_uart;
+    if (GPS_PROVIDER_REQUIRES_NO_SERIAL_PORT(gpsConfig()->provider) && gpsSerial != SERIAL_PORT_NONE) {
+        serialRemovePort(gpsSerial);
+    }
+
+    if (!GPS_PROVIDER_REQUIRES_NO_SERIAL_PORT(gpsConfig()->provider) && gpsSerial == SERIAL_PORT_NONE) {
+        featureDisableImmediate(FEATURE_GPS);
+    }
+#endif
+
+    for (unsigned i = 0; i < PID_PROFILE_COUNT; i++) {
+        // Fix filter settings to handle cases where an older configurator was used that
+        // allowed higher cutoff limits from previous firmware versions.
+        adjustFilterLimit(&pidProfilesMutable(i)->dterm_lpf1_static_hz, LPF_MAX_HZ);
+        adjustFilterLimit(&pidProfilesMutable(i)->dterm_lpf2_static_hz, LPF_MAX_HZ);
+        adjustFilterLimit(&pidProfilesMutable(i)->dterm_notch_hz, LPF_MAX_HZ);
+        adjustFilterLimit(&pidProfilesMutable(i)->dterm_notch_cutoff, 0);
+
+        // Prevent invalid notch cutoff
+        if (pidProfilesMutable(i)->dterm_notch_cutoff >= pidProfilesMutable(i)->dterm_notch_hz) {
+            pidProfilesMutable(i)->dterm_notch_hz = 0;
+        }
+
+#ifdef USE_DYN_LPF
+        //Prevent invalid dynamic lowpass
+        if (pidProfilesMutable(i)->dterm_lpf1_dyn_min_hz > pidProfilesMutable(i)->dterm_lpf1_dyn_max_hz) {
+            pidProfilesMutable(i)->dterm_lpf1_dyn_min_hz = 0;
+        }
+#endif
+
+        if (pidProfilesMutable(i)->motor_output_limit > MOTOR_OUTPUT_LIMIT_PERCENT_MAX || pidProfilesMutable(i)->motor_output_limit < MOTOR_OUTPUT_LIMIT_PERCENT_MIN) {
+            pidProfilesMutable(i)->motor_output_limit = MOTOR_OUTPUT_LIMIT_PERCENT_MAX;
+        }
+
+        if (pidProfilesMutable(i)->auto_profile_cell_count > MAX_AUTO_DETECT_CELL_COUNT || pidProfilesMutable(i)->auto_profile_cell_count < AUTO_PROFILE_CELL_COUNT_CHANGE) {
+            pidProfilesMutable(i)->auto_profile_cell_count = AUTO_PROFILE_CELL_COUNT_STAY;
+        }
+
+        // If the d_max value for any axis is <= the D gain then reset d_max to 0 for consistent Configurator behavior
+        for (unsigned axis = 0; axis <= FD_YAW; axis++) {
+            if (pidProfilesMutable(i)->d_max[axis] < pidProfilesMutable(i)->pid[axis].D) {
+                pidProfilesMutable(i)->d_max[axis] = 0;
+            }
+        }
+
+#if defined(USE_BATTERY_VOLTAGE_SAG_COMPENSATION)
+        if (batteryConfig()->voltageMeterSource != VOLTAGE_METER_ADC) {
+            pidProfilesMutable(i)->vbat_sag_compensation = 0;
+        }
+#endif
+    }
+
+    if (motorConfig()->dev.motorProtocol == MOTOR_PROTOCOL_BRUSHED) {
+        featureDisableImmediate(FEATURE_3D);
+
+        if (motorConfig()->mincommand < 1000) {
+            motorConfigMutable()->mincommand = 1000;
+        }
+    }
+
+    if ((motorConfig()->dev.motorProtocol == MOTOR_PROTOCOL_PWM ) && (motorConfig()->dev.motorPwmRate > BRUSHLESS_MOTORS_PWM_RATE)) {
+        motorConfigMutable()->dev.motorPwmRate = BRUSHLESS_MOTORS_PWM_RATE;
+    }
+
+    validateAndFixGyroConfig();
+
+#if defined(USE_MAG)
+    buildAlignmentFromStandardAlignment(&compassConfigMutable()->mag_customAlignment, compassConfig()->mag_alignment);
+#endif
+
+    for (int i = 0; i < GYRO_COUNT; i++) {
+        buildAlignmentFromStandardAlignment(&gyroDeviceConfigMutable(i)->customAlignment, gyroDeviceConfig(i)->alignment);
+    }
+
+#ifdef USE_ACC
+    if (accelerometerConfig()->accZero.values.roll != 0 ||
+        accelerometerConfig()->accZero.values.pitch != 0 ||
+        accelerometerConfig()->accZero.values.yaw != 0) {
+        accelerometerConfigMutable()->accZero.values.calibrationCompleted = 1;
+    }
+#endif // USE_ACC
+
+    bool hasConfiguredRxFeature =
+        featureIsConfigured(FEATURE_RX_PARALLEL_PWM) ||
+        featureIsConfigured(FEATURE_RX_PPM) ||
+        featureIsConfigured(FEATURE_RX_SERIAL) ||
+        featureIsConfigured(FEATURE_RX_MSP) ||
+        featureIsConfigured(FEATURE_RX_SPI);
+#if ENABLE_RX_UDP
+    hasConfiguredRxFeature = hasConfiguredRxFeature || featureIsConfigured(FEATURE_RX_UDP);
+#endif
+    if (!hasConfiguredRxFeature) {
+        featureEnableImmediate(DEFAULT_RX_FEATURE);
+    }
+
+    if (featureIsConfigured(FEATURE_RX_PPM)) {
+        featureDisableImmediate(FEATURE_RX_SERIAL | FEATURE_RX_PARALLEL_PWM | FEATURE_RX_MSP | FEATURE_RX_SPI | FEATURE_RX_UDP);
+    }
+
+    if (featureIsConfigured(FEATURE_RX_MSP)) {
+        featureDisableImmediate(FEATURE_RX_SERIAL | FEATURE_RX_PARALLEL_PWM | FEATURE_RX_PPM | FEATURE_RX_SPI | FEATURE_RX_UDP);
+    }
+
+    if (featureIsConfigured(FEATURE_RX_SERIAL)) {
+        featureDisableImmediate(FEATURE_RX_PARALLEL_PWM | FEATURE_RX_MSP | FEATURE_RX_PPM | FEATURE_RX_SPI | FEATURE_RX_UDP);
+    }
+
+#ifdef USE_RX_SPI
+    if (featureIsConfigured(FEATURE_RX_SPI)) {
+        featureDisableImmediate(FEATURE_RX_SERIAL | FEATURE_RX_PARALLEL_PWM | FEATURE_RX_PPM | FEATURE_RX_MSP | FEATURE_RX_UDP);
+    }
+#endif // USE_RX_SPI
+
+    if (featureIsConfigured(FEATURE_RX_PARALLEL_PWM)) {
+        featureDisableImmediate(FEATURE_RX_SERIAL | FEATURE_RX_MSP | FEATURE_RX_PPM | FEATURE_RX_SPI | FEATURE_RX_UDP);
+    }
+
+#if ENABLE_RX_UDP
+    if (featureIsConfigured(FEATURE_RX_UDP)) {
+        featureDisableImmediate(FEATURE_RX_SERIAL | FEATURE_RX_PARALLEL_PWM | FEATURE_RX_PPM | FEATURE_RX_MSP | FEATURE_RX_SPI);
+    }
+#endif // ENABLE_RX_UDP
+
+#if defined(USE_ADC)
+    if (featureIsConfigured(FEATURE_RSSI_ADC)) {
+        rxConfigMutable()->rssi_channel = 0;
+        rxConfigMutable()->rssi_src_frame_errors = false;
+    } else
+#endif
+    if (rxConfigMutable()->rssi_channel
+#if defined(USE_RX_PWM) || defined(USE_RX_PPM)
+        || featureIsConfigured(FEATURE_RX_PPM) || featureIsConfigured(FEATURE_RX_PARALLEL_PWM)
+#endif
+        ) {
+        rxConfigMutable()->rssi_src_frame_errors = false;
+    }
+
+    if (featureIsConfigured(FEATURE_3D) || !featureIsConfigured(FEATURE_GPS)
+#if !defined(USE_WING) || !ENABLE_RESCUE_PLAN
+        || mixerModeIsFixedWing(mixerConfig()->mixerMode)
+#endif
+#if !defined(USE_GPS) || !defined(USE_GPS_RESCUE)
+        || true
+#endif
+        ) {
+
+#ifdef USE_GPS_RESCUE
+        if (failsafeConfig()->failsafe_procedure == FAILSAFE_PROCEDURE_GPS_RESCUE) {
+            failsafeConfigMutable()->failsafe_procedure = FAILSAFE_PROCEDURE_DROP_IT;
+        }
+#endif
+        if (failsafeConfig()->failsafe_procedure >= FAILSAFE_PROCEDURE_COUNT) {
+            failsafeConfigMutable()->failsafe_procedure = FAILSAFE_PROCEDURE_DROP_IT;
+        }
+
+        if (isModeActivationConditionPresent(BOXGPSRESCUE)) {
+            removeModeActivationCondition(BOXGPSRESCUE);
+        }
+    }
+
+#if defined(USE_ESC_SENSOR)
+    // DroneCAN ESC telemetry feeds escSensorData[] without a serial port, so
+    // only a serial-sourced sensor requires one.
+    if (escSensorConfig()->esc_sensor_uart == SERIAL_PORT_NONE && !isMotorProtocolDronecan()) {
+        featureDisableImmediate(FEATURE_ESC_SENSOR);
+    }
+#endif
+
+    for (int i = 0; i < MAX_MODE_ACTIVATION_CONDITION_COUNT; i++) {
+        const modeActivationCondition_t *mac = modeActivationConditions(i);
+
+        if (mac->linkedTo) {
+            if (mac->modeId == BOXARM || isModeActivationConditionLinked(mac->linkedTo)) {
+                removeModeActivationCondition(mac->modeId);
+            }
+        }
+    }
+
+#if defined(USE_DSHOT_TELEMETRY) && defined(USE_DSHOT_BITBANG)
+    if (motorConfig()->dev.motorProtocol == MOTOR_PROTOCOL_PROSHOT1000 && motorConfig()->dev.useDshotTelemetry &&
+        motorConfig()->dev.useDshotBitbang == DSHOT_BITBANG_ON) {
+        motorConfigMutable()->dev.useDshotBitbang = DSHOT_BITBANG_AUTO;
+    }
+#endif
+
+#ifdef USE_ADC
+    adcConfigMutable()->vbat.enabled = (batteryConfig()->voltageMeterSource == VOLTAGE_METER_ADC);
+    adcConfigMutable()->current.enabled = (batteryConfig()->currentMeterSource == CURRENT_METER_ADC);
+
+    // The FrSky D SPI RX sends RSSI_ADC_PIN (if configured) as A2
+    adcConfigMutable()->rssi.enabled = featureIsEnabled(FEATURE_RSSI_ADC);
+#ifdef USE_RX_SPI
+    adcConfigMutable()->rssi.enabled |= (featureIsEnabled(FEATURE_RX_SPI) && rxSpiConfig()->rx_spi_protocol == RX_SPI_FRSKY_D);
+#endif
+#endif // USE_ADC
+
+    // Bounds check gyro filter selection in case prior build had USE_GYRO_DLPF_EXPERIMENTAL defined
+    if (gyroConfig()->gyro_hardware_lpf >= GYRO_HARDWARE_LPF_COUNT) {
+        gyroConfigMutable()->gyro_hardware_lpf = GYRO_HARDWARE_LPF_NORMAL;
+    }
+
+    // clear features that are not supported.
+    featureDisableImmediate(~featuresSupportedByBuild);
+
+    if (systemConfig()->configurationState == CONFIGURATION_STATE_UNCONFIGURED) {
+        // enable some compiled-in features by default
+        uint32_t autoFeatures =
+            FEATURE_TELEMETRY | FEATURE_OSD | FEATURE_LED_STRIP;
+#if defined(USE_SOFTSERIAL)
+        // enable softserial if at least one pin is configured
+        for (unsigned i = RESOURCE_SOFTSERIAL_OFFSET; i < RESOURCE_SOFTSERIAL_OFFSET + RESOURCE_SOFTSERIAL_COUNT; i++) {
+            if (serialPinConfig()->ioTagTx[i] || serialPinConfig()->ioTagRx[i]) {
+                autoFeatures |= FEATURE_SOFTSERIAL;
+                break;
+            }
+        }
+#endif
+        featureEnableImmediate(autoFeatures & featuresSupportedByBuild);
+    }
+
+#if defined(USE_BEEPER)
+#ifdef USE_TIMER
+    if (beeperDevConfig()->frequency && !timerGetConfiguredByTag(beeperDevConfig()->ioTag)) {
+        beeperDevConfigMutable()->frequency = 0;
+    }
+#endif
+
+    if (beeperConfig()->beeper_off_flags & ~BEEPER_ALLOWED_MODES) {
+        beeperConfigMutable()->beeper_off_flags = 0;
+    }
+
+#ifdef USE_DSHOT
+    if (beeperConfig()->dshotBeaconOffFlags & ~DSHOT_BEACON_ALLOWED_MODES) {
+        beeperConfigMutable()->dshotBeaconOffFlags = DEFAULT_DSHOT_BEACON_OFF_FLAGS;
+    }
+
+    if (beeperConfig()->dshotBeaconTone < DSHOT_CMD_BEACON1
+        || beeperConfig()->dshotBeaconTone > DSHOT_CMD_BEACON5) {
+        beeperConfigMutable()->dshotBeaconTone = DSHOT_CMD_BEACON1;
+    }
+#endif
+#endif
+
+    bool configuredMotorProtocolDshot = false;
+    checkMotorProtocolEnabled(&motorConfig()->dev, &configuredMotorProtocolDshot);
+#if defined(USE_DSHOT)
+    // If using DSHOT protocol disable unsynched PWM as it's meaningless
+    if (configuredMotorProtocolDshot) {
+        motorConfigMutable()->dev.useContinuousUpdate = false;
+    }
+
+#if defined(USE_DSHOT_TELEMETRY) && defined(USE_TIMER)
+    bool nChannelTimerUsed = false;
+    for (unsigned i = 0; i < getMotorCount(); i++) {
+        const ioTag_t tag = motorConfig()->dev.ioTags[i];
+        if (tag) {
+            const timerHardware_t *timer = timerGetConfiguredByTag(tag);
+            if (timer && timer->output & TIMER_OUTPUT_N_CHANNEL) {
+                nChannelTimerUsed = true;
+
+                break;
+            }
+        }
+    }
+
+    if ((!configuredMotorProtocolDshot || (motorConfig()->dev.useDshotBitbang == DSHOT_BITBANG_OFF && (motorConfig()->dev.useBurstDshot == DSHOT_DMAR_ON || nChannelTimerUsed))) && motorConfig()->dev.useDshotTelemetry) {
+        motorConfigMutable()->dev.useDshotTelemetry = false;
+    }
+#endif // USE_DSHOT_TELEMETRY
+#endif // USE_DSHOT
+
+#if defined(USE_OSD)
+    for (int i = 0; i < OSD_TIMER_COUNT; i++) {
+         const uint16_t t = osdConfig()->timers[i];
+         if (OSD_TIMER_SRC(t) >= OSD_TIMER_SRC_COUNT ||
+                 OSD_TIMER_PRECISION(t) >= OSD_TIMER_PREC_COUNT) {
+             osdConfigMutable()->timers[i] = osdTimerDefault[i];
+         }
+     }
+#endif
+
+#if defined(USE_VTX_COMMON) && defined(USE_VTX_TABLE)
+    // reset vtx band, channel, power if outside range specified by vtxtable
+    if (vtxSettingsConfig()->channel > vtxTableConfig()->channels) {
+        vtxSettingsConfigMutable()->channel = 0;
+        if (vtxSettingsConfig()->band > 0) {
+            vtxSettingsConfigMutable()->freq = 0; // band/channel determined frequency can't be valid anymore
+        }
+    }
+    if (vtxSettingsConfig()->band > vtxTableConfig()->bands) {
+        vtxSettingsConfigMutable()->band = 0;
+        vtxSettingsConfigMutable()->freq = 0; // band/channel determined frequency can't be valid anymore
+    }
+    if (vtxSettingsConfig()->power > vtxTableConfig()->powerLevels) {
+        vtxSettingsConfigMutable()->power = 0;
+    }
+#endif
+
+    validateAndFixRatesSettings();  // constrain the various rates settings to limits imposed by the rates type
+
+#if defined(USE_RX_MSP_OVERRIDE)
+    if (!rxConfig()->msp_override_channels_mask) {
+        removeModeActivationCondition(BOXMSPOVERRIDE);
+    }
+
+    for (int i = 0; i < MAX_MODE_ACTIVATION_CONDITION_COUNT; i++) {
+        const modeActivationCondition_t *mac = modeActivationConditions(i);
+        if (mac->modeId == BOXMSPOVERRIDE && ((1 << (mac->auxChannelIndex + NON_AUX_CHANNEL_COUNT) & (rxConfig()->msp_override_channels_mask)))) {
+            rxConfigMutable()->msp_override_channels_mask &= ~(1 << (mac->auxChannelIndex + NON_AUX_CHANNEL_COUNT));
+        }
+    }
+#endif
+
+    validateAndfixMotorOutputReordering(motorConfigMutable()->dev.motorOutputReordering, MAX_SUPPORTED_MOTORS);
+
+    // validate battery profile voltages and field bounds, reset to defaults if invalid
+    for (unsigned i = 0; i < BATTERY_PROFILE_COUNT; i++) {
+        const batteryProfile_t *profile = batteryProfiles(i);
+        if (profile->vbatmincellvoltage >= profile->vbatmaxcellvoltage
+            || profile->vbatwarningcellvoltage < profile->vbatmincellvoltage
+            || profile->vbatwarningcellvoltage > profile->vbatmaxcellvoltage
+            || profile->vbatfullcellvoltage < profile->vbatwarningcellvoltage
+            || profile->vbatfullcellvoltage > profile->vbatmaxcellvoltage) {
+            batteryProfilesMutable(i)->vbatmincellvoltage = VBAT_CELL_VOLTAGE_DEFAULT_MIN;
+            batteryProfilesMutable(i)->vbatmaxcellvoltage = VBAT_CELL_VOLTAGE_DEFAULT_MAX;
+            batteryProfilesMutable(i)->vbatwarningcellvoltage = 350;
+            batteryProfilesMutable(i)->vbatfullcellvoltage = 410;
+        }
+        if (profile->forceBatteryCellCount > BATTERY_FORCE_CELL_COUNT_MAX) {
+            batteryProfilesMutable(i)->forceBatteryCellCount = 0;
+        }
+        if (profile->consumptionWarningPercentage > BATTERY_CONSUMPTION_WARNING_PERCENT_MAX) {
+            batteryProfilesMutable(i)->consumptionWarningPercentage = 10;
+        }
+    }
+
+#ifdef USE_MSP_DISPLAYPORT
+    // Find the serial port the MSP display port is drawn over.  The OSD's own
+    // assignment names it; an MSP VTX with no OSD port set is the legacy way of
+    // saying the same thing, so its UART stands in when the OSD names none.
+    displayPortMspSetSerial(SERIAL_PORT_NONE);
+
+#ifdef USE_OSD
+    if (osdConfig()->displayPortDevice == OSD_DISPLAYPORT_DEVICE_MSP && osdConfig()->osd_uart != SERIAL_PORT_NONE) {
+        displayPortMspSetSerial(osdConfig()->osd_uart);
+    } else
+#endif
+    {
+        for (unsigned i = 0; i < ARRAYLEN(serialPortIdentifiers); i++) {
+            const serialPortIdentifier_e identifier = serialPortIdentifiers[i];
+            if ((identifier != SERIAL_PORT_USB_VCP)
+                && (serialSynthesizeFunctionMask(identifier) & FUNCTION_VTX_MSP)) {
+                displayPortMspSetSerial(identifier);
+                break;
+            }
+        }
+    }
+#endif
+
+#ifdef USE_BLACKBOX
+    validateAndFixBlackBox();
+#endif // USE_BLACKBOX
+
+#if defined(TARGET_VALIDATECONFIG)
+    // This should be done at the end of the validation
+    targetValidateConfiguration();
+#endif
+}
+
+void validateAndFixGyroConfig(void)
+{
+    // Fix gyro filter settings to handle cases where an older configurator was used that
+    // allowed higher cutoff limits from previous firmware versions.
+    adjustFilterLimit(&gyroConfigMutable()->gyro_lpf1_static_hz, LPF_MAX_HZ);
+    adjustFilterLimit(&gyroConfigMutable()->gyro_lpf2_static_hz, LPF_MAX_HZ);
+    adjustFilterLimit(&gyroConfigMutable()->gyro_soft_notch_hz_1, LPF_MAX_HZ);
+    adjustFilterLimit(&gyroConfigMutable()->gyro_soft_notch_cutoff_1, 0);
+    adjustFilterLimit(&gyroConfigMutable()->gyro_soft_notch_hz_2, LPF_MAX_HZ);
+    adjustFilterLimit(&gyroConfigMutable()->gyro_soft_notch_cutoff_2, 0);
+
+    // Prevent invalid notch cutoff
+    if (gyroConfig()->gyro_soft_notch_cutoff_1 >= gyroConfig()->gyro_soft_notch_hz_1) {
+        gyroConfigMutable()->gyro_soft_notch_hz_1 = 0;
+    }
+    if (gyroConfig()->gyro_soft_notch_cutoff_2 >= gyroConfig()->gyro_soft_notch_hz_2) {
+        gyroConfigMutable()->gyro_soft_notch_hz_2 = 0;
+    }
+#ifdef USE_DYN_LPF
+    //Prevent invalid dynamic lowpass filter
+    if (gyroConfig()->gyro_lpf1_dyn_min_hz > gyroConfig()->gyro_lpf1_dyn_max_hz) {
+        gyroConfigMutable()->gyro_lpf1_dyn_min_hz = 0;
+    }
+#endif
+
+    if (gyro.sampleRateHz > 0) {
+        float samplingTime = 1.0f / gyro.sampleRateHz;
+
+        // check for looptime restrictions based on motor protocol. Motor times have safety margin
+        float motorUpdateRestriction;
+
+#if defined(USE_DSHOT) && defined(USE_PID_DENOM_CHECK)
+        /* If bidirectional DSHOT is being used on an F4, F7 or G4 then force DSHOT300. The motor update restrictions then applied
+         * will automatically consider the loop time and adjust pid_process_denom appropriately
+         */
+        if (true
+#ifdef USE_PID_DENOM_OVERCLOCK_LEVEL
+        && (systemConfig()->cpu_overclock < USE_PID_DENOM_OVERCLOCK_LEVEL)
+#endif
+        && motorConfig()->dev.useDshotTelemetry
+        ) {
+            if (motorConfig()->dev.motorProtocol == MOTOR_PROTOCOL_DSHOT600) {
+                motorConfigMutable()->dev.motorProtocol = MOTOR_PROTOCOL_DSHOT300;
+            }
+            if (gyro.sampleRateHz > 4000) {
+                pidConfigMutable()->pid_process_denom = MAX(2, pidConfig()->pid_process_denom);
+            }
+        }
+#endif // USE_DSHOT && USE_PID_DENOM_CHECK
+        switch (motorConfig()->dev.motorProtocol) {
+        case MOTOR_PROTOCOL_PWM :
+                motorUpdateRestriction = 1.0f / BRUSHLESS_MOTORS_PWM_RATE;
+                break;
+        case MOTOR_PROTOCOL_ONESHOT125:
+                motorUpdateRestriction = 0.0005f;
+                break;
+        case MOTOR_PROTOCOL_ONESHOT42:
+                motorUpdateRestriction = 0.0001f;
+                break;
+#ifdef USE_DSHOT
+        case MOTOR_PROTOCOL_DSHOT150:
+                motorUpdateRestriction = 0.000250f;
+                break;
+        case MOTOR_PROTOCOL_DSHOT300:
+                motorUpdateRestriction = 0.0001f;
+                break;
+#endif
+        default:
+            motorUpdateRestriction = 0.00003125f;
+            break;
+        }
+
+        if (motorConfig()->dev.useContinuousUpdate) {
+            bool configuredMotorProtocolDshot = false;
+            checkMotorProtocolEnabled(&motorConfig()->dev, &configuredMotorProtocolDshot);
+            // Prevent overriding the max rate of motors
+            if (!configuredMotorProtocolDshot && motorConfig()->dev.motorProtocol != MOTOR_PROTOCOL_PWM ) {
+                const uint32_t maxEscRate = lrintf(1.0f / motorUpdateRestriction);
+                motorConfigMutable()->dev.motorPwmRate = MIN(motorConfig()->dev.motorPwmRate, maxEscRate);
+            }
+        } else {
+            const float pidLooptime = samplingTime * pidConfig()->pid_process_denom;
+            if (motorConfig()->dev.useDshotTelemetry) {
+                motorUpdateRestriction *= 2;
+            }
+            if (pidLooptime < motorUpdateRestriction) {
+                uint8_t minPidProcessDenom = motorUpdateRestriction / samplingTime;
+                if (motorUpdateRestriction / samplingTime > minPidProcessDenom) {
+                    // if any fractional part then round up
+                    minPidProcessDenom++;
+                }
+                minPidProcessDenom = constrain(minPidProcessDenom, 1, MAX_PID_PROCESS_DENOM);
+                pidConfigMutable()->pid_process_denom = MAX(pidConfigMutable()->pid_process_denom, minPidProcessDenom);
+            }
+        }
+    }
+
+    if (systemConfig()->activeRateProfile >= CONTROL_RATE_PROFILE_COUNT) {
+        systemConfigMutable()->activeRateProfile = 0;
+    }
+    loadControlRateProfile();
+
+    if (systemConfig()->pidProfileIndex >= PID_PROFILE_COUNT) {
+        systemConfigMutable()->pidProfileIndex = 0;
+    }
+    loadPidProfile();
+
+    if (systemConfig()->activeBatteryProfile >= BATTERY_PROFILE_COUNT) {
+        systemConfigMutable()->activeBatteryProfile = 0;
+    }
+    loadBatteryProfile();
+
+#if ENABLE_FLIGHT_PLAN
+    if (flightPlanConfigMutable()->waypointCount > MAX_WAYPOINTS) {
+        flightPlanConfigMutable()->waypointCount = 0;
+    }
+#endif
+}
+
+#ifdef USE_BLACKBOX
+void validateAndFixBlackBox(void) {
+#ifndef USE_FLASHFS
+    if (blackboxConfig()->device == BLACKBOX_DEVICE_FLASH) {
+        blackboxConfigMutable()->device = BLACKBOX_DEVICE_NONE;
+    }
+#endif // USE_FLASHFS
+
+    if (blackboxConfig()->device == BLACKBOX_DEVICE_SDCARD) {
+#if defined(USE_SDCARD)
+        if (!sdcardConfig()->mode)
+#endif
+        {
+            blackboxConfigMutable()->device = BLACKBOX_DEVICE_NONE;
+        }
+    }
+}
+#endif // USE_BLACKBOX
+
+bool readEEPROM(void)
+{
+    suspendRxSignal();
+
+    // Sanity check, read flash
+    bool success = loadEEPROM();
+
+    featureInit();
+
+    validateAndFixConfig();
+
+    activateConfig();
+
+    resumeRxSignal();
+
+    return success;
+}
+
+void writeUnmodifiedConfigToEEPROM(void)
+{
+    validateAndFixConfig();
+
+    suspendRxSignal();
+    eepromWriteInProgress = true;
+    writeConfigToEEPROM();
+    eepromWriteInProgress = false;
+    resumeRxSignal();
+    configIsDirty = false;
+}
+
+void writeEEPROM(void)
+{
+#ifdef USE_RX_SPI
+    rxSpiStop(); // some rx spi protocols use hardware timer, which needs to be stopped before writing to eeprom
+#endif
+    systemConfigMutable()->configurationState = CONFIGURATION_STATE_CONFIGURED;
+
+    writeUnmodifiedConfigToEEPROM();
+}
+
+bool resetEEPROM(configResetReason_e reason, uint16_t detail)
+{
+    resetConfig();
+
+    systemConfigMutable()->configResetReason = reason;
+    systemConfigMutable()->configResetDetail = detail;
+
+    writeUnmodifiedConfigToEEPROM();
+
+    return true;
+}
+
+void resetEEPROMOnLoadFault(void)
+{
+    uint16_t detail;
+    configResetReason_e reason = diagnoseEEPROM(&detail);
+    if (reason == CONFIG_RESET_NONE) {
+        reason = CONFIG_RESET_BOARD;
+    }
+
+    resetEEPROM(reason, detail);
+}
+
+void ensureEEPROMStructureIsValid(void)
+{
+    if (isEEPROMStructureValid()) {
+        return;
+    }
+    resetEEPROMOnLoadFault();
+}
+
+void saveConfigAndNotify(void)
+{
+    // The write to EEPROM will cause a big delay in the current task, so ignore
+    schedulerIgnoreTaskExecTime();
+
+    writeEEPROM();
+    readEEPROM();
+    beeperConfirmationBeeps(1);
+}
+
+void setConfigDirty(void)
+{
+    configIsDirty = true;
+}
+
+bool isConfigDirty(void)
+{
+    return configIsDirty;
+}
+
+void changePidProfileFromCellCount(uint8_t cellCount)
+{
+    if (currentPidProfile->auto_profile_cell_count == cellCount || currentPidProfile->auto_profile_cell_count == AUTO_PROFILE_CELL_COUNT_STAY) {
+        return;
+    }
+
+    unsigned profileIndex = (systemConfig()->pidProfileIndex + 1) % PID_PROFILE_COUNT;
+    int matchingProfileIndex = -1;
+    while (profileIndex != systemConfig()->pidProfileIndex) {
+        if (pidProfiles(profileIndex)->auto_profile_cell_count == cellCount) {
+            matchingProfileIndex = profileIndex;
+
+            break;
+        } else if (matchingProfileIndex < 0 && pidProfiles(profileIndex)->auto_profile_cell_count == AUTO_PROFILE_CELL_COUNT_STAY) {
+            matchingProfileIndex = profileIndex;
+        }
+
+        profileIndex = (profileIndex + 1) % PID_PROFILE_COUNT;
+    }
+
+    if (matchingProfileIndex >= 0) {
+        changePidProfile(matchingProfileIndex);
+    }
+}
+
+void changePidProfile(uint8_t pidProfileIndex)
+{
+    // The config switch will cause a big enough delay in the current task to upset the scheduler
+    schedulerIgnoreTaskExecTime();
+
+    if (pidProfileIndex < PID_PROFILE_COUNT) {
+        systemConfigMutable()->pidProfileIndex = pidProfileIndex;
+        loadPidProfile();
+
+        pidInit(currentPidProfile);
+        initEscEndpoints();
+        mixerInitProfile();
+    }
+
+    beeperConfirmationBeeps(pidProfileIndex + 1);
+}
+
+bool isSystemConfigured(void)
+{
+    return systemConfig()->configurationState == CONFIGURATION_STATE_CONFIGURED;
+}
+
+void setRebootRequired(void)
+{
+    rebootRequired = true;
+    setArmingDisabled(ARMING_DISABLED_REBOOT_REQUIRED);
+}
+
+bool getRebootRequired(void)
+{
+    return rebootRequired;
+}

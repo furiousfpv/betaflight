@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -21,87 +24,106 @@
 
 #include "platform.h"
 
+#if defined(USE_ACC_SPI_ICM20689) || defined(USE_GYRO_SPI_ICM20689)
+
 #include "common/axis.h"
 #include "common/maths.h"
 
-#include "drivers/system.h"
+#include "drivers/accgyro/accgyro.h"
+#include "drivers/accgyro/accgyro_mpu.h"
+#include "drivers/accgyro/accgyro_spi_icm20689.h"
+#include "drivers/bus_spi.h"
 #include "drivers/exti.h"
 #include "drivers/io.h"
-#include "drivers/bus_spi.h"
-#include "drivers/gpio.h"
-#include "drivers/gyro_sync.h"
-
 #include "drivers/sensor.h"
-#include "accgyro.h"
-#include "accgyro_mpu.h"
-#include "accgyro_spi_icm20689.h"
+#include "drivers/time.h"
 
-#define DISABLE_ICM20689(spiCsnPin)       IOHi(spiCsnPin)
-#define ENABLE_ICM20689(spiCsnPin)        IOLo(spiCsnPin)
+// 8 MHz max SPI frequency
+#define ICM20689_MAX_SPI_CLK_HZ 8000000
 
-bool icm20689SpiWriteRegister(const busDevice_t *bus, uint8_t reg, uint8_t data)
+// Register 0x37 - INT_PIN_CFG / Pin Bypass Enable Configuration
+#define ICM20689_INT_ANYRD_2CLEAR   0x10
+
+// Register 0x68 - SIGNAL_PATH_RESET / Pin Bypass Enable Configuration
+#define ICM20689_ACCEL_RST          0x02
+#define ICM20689_TEMP_RST           0x01
+
+// Register 0x6a - USER_CTRL / User Control
+#define ICM20689_I2C_IF_DIS         0x10
+
+// Register 0x6b - PWR_MGMT_1 / Power Management 1
+#define ICM20689_BIT_RESET          0x80
+
+/* Allow CLKSEL setting time to settle when PLL is selected
+ *
+ * Not specified in the ICM-20689 datasheet, but in the ICM-20690 datasheet,
+ *
+ * https://invensense.tdk.com/wp-content/uploads/2016/10/DS-000178-ICM-20690-v1.0.pdf
+ *
+ * says (section 10.11) that the clock selection takes ~20us to settle. Testing
+ * has shown that 60us is required, so double to allow a margin
+ */
+#define ICM20689_CLKSEL_SETTLE_US   120
+
+/* Not specified in the ICM-20689 datasheet, but in the MPU-6000 datasheet,
+ *
+ * https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf
+ *
+ * says (section 4.28) suggest a delay of 100ms after a reset
+ */
+#define ICM20689_RESET_DELAY_MS     100
+
+/* Not specified in the ICM-20689 datasheet, but in the MPU-6000 datasheet,
+ *
+ * https://invensense.tdk.com/wp-content/uploads/2015/02/MPU-6000-Register-Map1.pdf
+ *
+ * says (section 4.28) suggest a delay of 100ms after a path reset
+ */
+#define ICM20689_PATH_RESET_DELAY_MS 100
+
+uint8_t icm20689SpiDetect(const extDevice_t *dev)
 {
-    ENABLE_ICM20689(bus->spi.csnPin);
-    spiTransferByte(ICM20689_SPI_INSTANCE, reg);
-    spiTransferByte(ICM20689_SPI_INSTANCE, data);
-    DISABLE_ICM20689(bus->spi.csnPin);
+    // Note that the following reset is being done repeatedly by each MPU6000
+    // compatible device being probed
 
-    return true;
-}
+    // reset the device configuration
+    spiWriteReg(dev, MPU_RA_PWR_MGMT_1, ICM20689_BIT_RESET);
+    delay(ICM20689_RESET_DELAY_MS);
 
-bool icm20689SpiReadRegister(const busDevice_t *bus, uint8_t reg, uint8_t length, uint8_t *data)
-{
-    ENABLE_ICM20689(bus->spi.csnPin);
-    spiTransferByte(ICM20689_SPI_INSTANCE, reg | 0x80); // read transaction
-    spiTransfer(ICM20689_SPI_INSTANCE, data, NULL, length);
-    DISABLE_ICM20689(bus->spi.csnPin);
+    uint8_t icmDetected;
 
-    return true;
-}
+    const uint8_t whoAmI = spiReadRegMsk(dev, MPU_RA_WHO_AM_I);
 
-static void icm20689SpiInit(const busDevice_t *bus)
-{
-    static bool hardwareInitialised = false;
-
-    if (hardwareInitialised) {
-        return;
+    switch (whoAmI) {
+    case ICM20601_WHO_AM_I_CONST:
+        icmDetected = ICM_20601_SPI;
+        break;
+    case ICM20602_WHO_AM_I_CONST:
+        icmDetected = ICM_20602_SPI;
+        break;
+    case ICM20608G_WHO_AM_I_CONST:
+        icmDetected = ICM_20608_SPI;
+        break;
+    case ICM20689_WHO_AM_I_CONST:
+        icmDetected = ICM_20689_SPI;
+        break;
+    default:
+        icmDetected = MPU_NONE;
+        return icmDetected;
     }
 
-    IOInit(bus->spi.csnPin, OWNER_MPU_CS, 0);
-    IOConfigGPIO(bus->spi.csnPin, SPI_IO_CS_CFG);
+    // We now know the device is recognised so it's safe to perform device
+    // specific register accesses
 
-    spiSetDivisor(ICM20689_SPI_INSTANCE, SPI_CLOCK_STANDARD);
+    // Disable Primary I2C Interface
+    spiWriteReg(dev, MPU_RA_USER_CTRL, ICM20689_I2C_IF_DIS);
 
-    hardwareInitialised = true;
-}
+    // Reset the device signal paths
+    spiWriteReg(dev, MPU_RA_SIGNAL_PATH_RESET, ICM20689_ACCEL_RST | ICM20689_TEMP_RST);
 
-bool icm20689SpiDetect(const busDevice_t *bus)
-{
-    uint8_t tmp;
-    uint8_t attemptsRemaining = 20;
+    delay(ICM20689_PATH_RESET_DELAY_MS);
 
-    icm20689SpiInit(bus);
-
-    spiSetDivisor(ICM20689_SPI_INSTANCE, SPI_CLOCK_INITIALIZATON); //low speed
-
-    icm20689SpiWriteRegister(bus, MPU_RA_PWR_MGMT_1, ICM20689_BIT_RESET);
-
-    do {
-        delay(150);
-
-        icm20689SpiReadRegister(bus, MPU_RA_WHO_AM_I, 1, &tmp);
-        if (tmp == ICM20689_WHO_AM_I_CONST) {
-            break;
-        }
-        if (!attemptsRemaining) {
-            return false;
-        }
-    } while (attemptsRemaining--);
-
-    spiSetDivisor(ICM20689_SPI_INSTANCE, SPI_CLOCK_STANDARD);
-
-    return true;
-
+    return icmDetected;
 }
 
 void icm20689AccInit(accDev_t *acc)
@@ -111,65 +133,64 @@ void icm20689AccInit(accDev_t *acc)
 
 bool icm20689SpiAccDetect(accDev_t *acc)
 {
-    if (acc->mpuDetectionResult.sensor != ICM_20689_SPI) {
+    switch (acc->mpuDetectionResult.sensor) {
+    case ICM_20602_SPI:
+    case ICM_20689_SPI:
+        break;
+    default:
         return false;
     }
 
-    acc->init = icm20689AccInit;
-    acc->read = mpuAccRead;
+    acc->initFn = icm20689AccInit;
+    acc->readFn = mpuAccReadSPI;
 
     return true;
 }
 
 void icm20689GyroInit(gyroDev_t *gyro)
 {
+    extDevice_t *dev = &gyro->dev;
+
+    spiSetClkDivisor(dev, spiCalculateDivider(ICM20689_MAX_SPI_CLK_HZ));
+
     mpuGyroInit(gyro);
 
-    spiSetDivisor(ICM20689_SPI_INSTANCE, SPI_CLOCK_INITIALIZATON);
+    // Device was already reset during detection so proceed with configuration
 
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_PWR_MGMT_1, ICM20689_BIT_RESET);
-    delay(100);
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_SIGNAL_PATH_RESET, 0x03);
-    delay(100);
-//    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_PWR_MGMT_1, 0);
-//    delay(100);
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_PWR_MGMT_1, INV_CLK_PLL);
-    delay(15);
-    const uint8_t raGyroConfigData = gyro->gyroRateKHz > GYRO_RATE_8_kHz ? (INV_FSR_2000DPS << 3 | FCB_3600_32) : (INV_FSR_2000DPS << 3 | FCB_DISABLED);
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_GYRO_CONFIG, raGyroConfigData);
-    delay(15);
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_ACCEL_CONFIG, INV_FSR_16G << 3);
-    delay(15);
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_CONFIG, gyro->lpf);
-    delay(15);
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_SMPLRT_DIV, gyroMPU6xxxGetDividerDrops(gyro)); // Get Divider Drops
-    delay(100);
+    spiWriteReg(dev, MPU_RA_PWR_MGMT_1, INV_CLK_PLL);
+    delayMicroseconds(ICM20689_CLKSEL_SETTLE_US);
+    spiWriteReg(dev, MPU_RA_GYRO_CONFIG, INV_FSR_2000DPS << 3);
+    spiWriteReg(dev, MPU_RA_ACCEL_CONFIG, INV_FSR_16G << 3);
+    spiWriteReg(dev, MPU_RA_CONFIG, mpuGyroDLPF(gyro));
+    spiWriteReg(dev, MPU_RA_SMPLRT_DIV, gyro->mpuDividerDrops);
 
     // Data ready interrupt configuration
-//    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_INT_PIN_CFG, 0 << 7 | 0 << 6 | 0 << 5 | 1 << 4 | 0 << 3 | 0 << 2 | 0 << 1 | 0 << 0);  // INT_ANYRD_2CLEAR, BYPASS_EN
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_INT_PIN_CFG, 0x10);  // INT_ANYRD_2CLEAR, BYPASS_EN
+    spiWriteReg(dev, MPU_RA_INT_PIN_CFG, ICM20689_INT_ANYRD_2CLEAR);
 
-    delay(15);
+    spiWriteReg(dev, MPU_RA_INT_ENABLE, MPU_RF_DATA_RDY_EN);
 
-#ifdef USE_MPU_DATA_READY_SIGNAL
-    gyro->mpuConfiguration.writeFn(&gyro->bus, MPU_RA_INT_ENABLE, 0x01); // RAW_RDY_EN interrupt enable
-#endif
-
-    spiSetDivisor(ICM20689_SPI_INSTANCE, SPI_CLOCK_STANDARD);
+    gyro->tempScale = 0.003f;
+    gyro->tempZero = 25.0f;
 }
 
 bool icm20689SpiGyroDetect(gyroDev_t *gyro)
 {
-    if (gyro->mpuDetectionResult.sensor != ICM_20689_SPI) {
+    switch (gyro->mpuDetectionResult.sensor) {
+    case ICM_20601_SPI:
+    case ICM_20602_SPI:
+    case ICM_20608_SPI:
+    case ICM_20689_SPI:
+        break;
+    default:
         return false;
     }
 
-    gyro->init = icm20689GyroInit;
-    gyro->read = mpuGyroRead;
-    gyro->intStatus = mpuCheckDataReady;
+    gyro->initFn = icm20689GyroInit;
+    gyro->readFn = mpuGyroReadSPI;
 
-    // 16.4 dps/lsb scalefactor
-    gyro->scale = 1.0f / 16.4f;
+    gyro->scale = GYRO_SCALE_2000DPS;
 
     return true;
 }
+
+#endif // USE_ACC_SPI_ICM20689 || USE_GYRO_SPI_ICM20689

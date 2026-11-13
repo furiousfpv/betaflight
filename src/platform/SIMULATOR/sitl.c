@@ -1,0 +1,1073 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include <stdbool.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <math.h>
+#include <string.h>
+
+#include <errno.h>
+#include <time.h>
+
+#include "common/maths.h"
+
+#include "build/debug.h"
+
+#include "drivers/exti.h"
+#include "drivers/io.h"
+#include "drivers/dma.h"
+#include "drivers/motor_impl.h"
+#include "drivers/serial.h"
+#include "drivers/serial_tcp.h"
+#include "drivers/system.h"
+#include "drivers/time.h"
+#include "drivers/usb_io.h"
+#include "drivers/pwm_output.h"
+#include "drivers/servo_impl.h"
+#include "drivers/pwm_output_impl.h"
+#include "drivers/light_led.h"
+
+#include "drivers/timer.h"
+#include "timer_def.h"
+
+#include "drivers/accgyro/accgyro_virtual.h"
+#include "drivers/barometer/barometer_virtual.h"
+#include "drivers/compass/compass_virtual.h"
+#include "flight/imu.h"
+#include "flight/position.h"
+
+#include "config/feature.h"
+#include "config/config.h"
+#include "config/config_streamer.h"
+#include "config/config_streamer_impl.h"
+#include "config/config_eeprom_impl.h"
+
+#include "scheduler/scheduler.h"
+
+#include "pg/rx.h"
+#include "pg/motor.h"
+
+#include "rx/rx.h"
+#include "rx/spektrum.h"
+
+#include "fc/rc.h"
+#include "fc/rc_controls.h"
+#include "fc/runtime_config.h"
+#include "sensors/sensors.h"
+#include "pg/flight_plan.h"
+
+#include "io/gps.h"
+#include "io/gps_virtual.h"
+
+#include "dyad.h"
+#include "udplink.h"
+#include "sitl_gyro.h"
+
+// ENABLE_GAZEBO_BRIDGE is a boolean selector for the gyro yaw sign (passed to
+// sitlGyroBodyFromSim below). target.h defaults it to 1; configs set 0 for the
+// legacy bridges. Require it to be explicitly 0 or 1 so an accidental non-boolean
+// value (which would quietly read as "Gazebo") fails the build instead (see #15294).
+STATIC_ASSERT((ENABLE_GAZEBO_BRIDGE) == 0 || (ENABLE_GAZEBO_BRIDGE) == 1,
+              ENABLE_GAZEBO_BRIDGE_must_be_0_or_1);
+
+uint32_t SystemCoreClock;
+
+static fdm_packet fdmPkt;
+static rc_packet rcPkt;
+static servo_packet pwmPkt;
+static servo_packet_raw pwmRawPkt;
+
+static bool rc_received = false;
+static bool fdm_received = false;
+
+static struct timespec start_time;
+static double simRate = 1.0;
+static pthread_t tcpWorker, udpWorker, udpWorkerRC;
+static bool workerRunning = true;
+static udpLink_t stateLink, pwmLink, pwmRawLink, rcLink;
+static pthread_mutex_t updateLock;
+static pthread_mutex_t mainLoopLock;
+static char simulator_ip[32] = "127.0.0.1";
+
+static const char *configFilePath = NULL;
+
+// GPX track logging for post-flight visualisation (enabled with --gpx)
+static FILE *gpxTrackFile = NULL;
+static bool gpxHeaderWritten = false;
+static bool gpxEnabled = false;
+
+#if ENABLE_FLIGHT_PLAN
+static const char *gpxWaypointTypeName(uint8_t type)
+{
+    switch (type) {
+    case WAYPOINT_TYPE_FLYOVER: return "FLYOVER";
+    case WAYPOINT_TYPE_FLYBY:   return "FLYBY";
+    case WAYPOINT_TYPE_HOLD:    return "HOLD";
+    case WAYPOINT_TYPE_LAND:    return "LAND";
+    default:                    return "UNKNOWN";
+    }
+}
+#endif
+
+static void gpxTrackOpen(void)
+{
+    gpxTrackFile = fopen("sitl_track.gpx", "w");
+    if (gpxTrackFile) {
+        fprintf(gpxTrackFile,
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<gpx version=\"1.1\" creator=\"Betaflight SITL\"\n"
+            "     xmlns=\"http://www.topografix.com/GPX/1/1\">\n");
+
+#if ENABLE_FLIGHT_PLAN
+        // Flight plan waypoints as GPX points of interest
+        const flightPlanConfig_t *plan = flightPlanConfig();
+        for (uint8_t i = 0; i < plan->waypointCount && i < MAX_WAYPOINTS; i++) {
+            const waypoint_t *wp = &plan->waypoints[i];
+            fprintf(gpxTrackFile,
+                "  <wpt lat=\"%.7f\" lon=\"%.7f\">\n"
+                "    <ele>%.2f</ele>\n"
+                "    <name>WP%d %s</name>\n"
+                "  </wpt>\n",
+                (double)wp->latitude / 1e7,
+                (double)wp->longitude / 1e7,
+                (double)wp->altitude / 100.0,
+                i, gpxWaypointTypeName(wp->type));
+        }
+#endif
+
+        fprintf(gpxTrackFile,
+            "  <trk>\n"
+            "    <name>SITL Flight Track</name>\n"
+            "    <trkseg>\n");
+        gpxHeaderWritten = true;
+    }
+}
+
+static void gpxTrackWrite(double lat, double lon, double altM)
+{
+    if (!gpxTrackFile) {
+        gpxTrackOpen();
+    }
+    if (!gpxTrackFile) {
+        return;
+    }
+    char iso[32];
+    const time_t now = time(NULL);
+    struct tm tm_utc;
+    gmtime_r(&now, &tm_utc);
+    strftime(iso, sizeof(iso), "%Y-%m-%dT%H:%M:%SZ", &tm_utc);
+    fprintf(gpxTrackFile,
+        "      <trkpt lat=\"%.7f\" lon=\"%.7f\">\n"
+        "        <ele>%.2f</ele>\n"
+        "        <time>%s</time>\n"
+        "      </trkpt>\n",
+        lat, lon, altM, iso);
+    fflush(gpxTrackFile);
+}
+
+static void gpxTrackClose(void)
+{
+    if (gpxTrackFile && gpxHeaderWritten) {
+        fprintf(gpxTrackFile,
+            "    </trkseg>\n"
+            "  </trk>\n"
+            "</gpx>\n");
+        fclose(gpxTrackFile);
+        gpxTrackFile = NULL;
+        gpxHeaderWritten = false;
+        printf("[SITL] GPS track written to sitl_track.gpx\n");
+    }
+}
+
+#define PORT_PWM_RAW    9001    // Out
+#define PORT_PWM        9002    // Out
+#define PORT_STATE      9003    // In
+#define PORT_RC         9004    // In
+
+int targetParseArgs(int argc, char * argv[])
+{
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Betaflight SITL\n");
+            printf("Usage: %s [options]\n", argv[0]);
+            printf("Options:\n");
+            printf("  --ip <address>     Simulator IP address (default: %s)\n", simulator_ip);
+#ifdef CONFIG_IN_FILE
+            printf("  --config <file>    Load CLI config file, save to EEPROM, and exit\n");
+#endif
+            printf("  --gpx              Write GPS track to sitl_track.gpx\n");
+            printf("  --help, -h         Show this help message\n");
+            exit(0);
+#ifdef CONFIG_IN_FILE
+        } else if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+            configFilePath = argv[++i];
+#endif
+        } else if (strcmp(argv[i], "--ip") == 0 && i + 1 < argc) {
+            strncpy(simulator_ip, argv[++i], sizeof(simulator_ip) - 1);
+            simulator_ip[sizeof(simulator_ip) - 1] = '\0';
+        } else if (strcmp(argv[i], "--gpx") == 0) {
+            gpxEnabled = true;
+        } else {
+            fprintf(stderr, "[SITL] Unknown argument: %s (use --help for usage)\n", argv[i]);
+            exit(1);
+        }
+    }
+
+#ifdef CONFIG_IN_FILE
+    if (configFilePath) {
+        FILE *fp = fopen(configFilePath, "r");
+        if (!fp) {
+            fprintf(stderr, "[SITL] Config file not found: %s\n", configFilePath);
+            exit(1);
+        }
+        fclose(fp);
+        printf("[SITL] Config file: %s (will load, save to EEPROM, and exit)\n", configFilePath);
+    }
+#endif
+
+    printf("[SITL] The SITL will output to IP %s:%d (Gazebo) and %s:%d (RealFlightBridge)\n",
+           simulator_ip, PORT_PWM, simulator_ip, PORT_PWM_RAW);
+    return 0;
+}
+
+#ifdef CONFIG_IN_FILE
+const char *targetGetConfigFile(void)
+{
+    return configFilePath;
+}
+#endif
+
+int timeval_sub(struct timespec *result, struct timespec *x, struct timespec *y);
+
+int lockMainPID(void)
+{
+    return pthread_mutex_trylock(&mainLoopLock);
+}
+
+#define RAD2DEG (180.0 / M_PI)
+#define ACC_SCALE (256 / 9.80665)
+#define GYRO_SCALE (16.4)
+
+static void sendMotorUpdate(void)
+{
+    udpSend(&pwmLink, &pwmPkt, sizeof(servo_packet));
+}
+
+static void updateState(const fdm_packet* pkt)
+{
+    static double last_timestamp = 0; // in seconds
+    static uint64_t last_realtime = 0; // in uS
+    static struct timespec last_ts; // last packet
+
+    struct timespec now_ts;
+    clock_gettime(CLOCK_MONOTONIC, &now_ts);
+
+    const uint64_t realtime_now = micros64_real();
+    if (realtime_now > last_realtime + 500*1e3) { // 500ms timeout
+        last_timestamp = pkt->timestamp;
+        last_realtime = realtime_now;
+        last_ts.tv_sec  = now_ts.tv_sec;
+        last_ts.tv_nsec = now_ts.tv_nsec;
+        sendMotorUpdate();
+        return;
+    }
+
+    const double deltaSim = pkt->timestamp - last_timestamp;  // in seconds
+    if (deltaSim < 0) { // don't use old packet
+        return;
+    }
+
+    int16_t x,y,z;
+    x = constrain(-pkt->imu_linear_acceleration_xyz[0] * ACC_SCALE, -32767, 32767);
+    y = constrain(-pkt->imu_linear_acceleration_xyz[1] * ACC_SCALE, -32767, 32767);
+    z = constrain(-pkt->imu_linear_acceleration_xyz[2] * ACC_SCALE, -32767, 32767);
+    virtualAccSet(virtualAccDev, x, y, z);
+
+    // Map simulator IMU angular velocity onto Betaflight gyro axes. The yaw (Z)
+    // polarity is bridge-specific (see sitlGyroBodyFromSim() for the FRD/legacy
+    // rationale); ENABLE_GAZEBO_BRIDGE selects it. Keeping the mapping in one
+    // helper prevents the bridge split from being silently dropped by edits to
+    // this function, which is what caused regression #15294.
+    double gyroRoll, gyroPitch, gyroYaw;
+    sitlGyroBodyFromSim(pkt->imu_angular_velocity_rpy, ENABLE_GAZEBO_BRIDGE, &gyroRoll, &gyroPitch, &gyroYaw);
+    x = constrain(gyroRoll  * GYRO_SCALE * RAD2DEG, -32767, 32767);
+    y = constrain(gyroPitch * GYRO_SCALE * RAD2DEG, -32767, 32767);
+    z = constrain(gyroYaw   * GYRO_SCALE * RAD2DEG, -32767, 32767);
+    virtualGyroSet(virtualGyroDev, x, y, z);
+#if ENABLE_GAZEBO_BRIDGE
+    // Gazebo plugin doesn't fill pkt->pressure; derive from altitude using the
+    // standard atmosphere model: P = 101325 * (1 - 2.25577e-5 * h)^5.25588
+    const double altMeters = pkt->position_xyz[2];
+    const int32_t pressure = (int32_t)(101325.0 * pow(1.0 - 2.25577e-5 * altMeters, 5.25588));
+    virtualBaroSet(pressure, 2500);
+#else
+    // Legacy bridges (X-Plane, RealFlight) supply pressure directly in fdm_packet
+    virtualBaroSet((int32_t)pkt->pressure, 2500);
+#endif
+    // Reconstruct the body-to-world (NWU) attitude quaternion from the packet.
+    // Consumed by the direct-attitude path and by the virtual mag feed, which
+    // must use the same rotation or mag fusion fights the fed attitude.
+#if ENABLE_GAZEBO_BRIDGE
+    // The Gazebo BetaflightPlugin sends the quaternion conjugated by Rx(π)
+    // (q_plugin = Rx(π) * M * Rx(π), with M the FLU-body to ENU-world
+    // attitude). Undo the conjugation (negate qy/qz), then rotate the world
+    // frame by Rz(π/2) (ENU -> NWU): q = Rz(π/2) * Rx(π) * q_plugin * Rx(π).
+    // FLU body equals Betaflight's internal NWU body, so the result is the
+    // proper body-to-world rotation - the Euler display and every rMat
+    // vector consumer (position estimator, mag fusion) agree at any heading.
+    const float pktQw = pkt->imu_orientation_quat[0];
+    const float pktQx = pkt->imu_orientation_quat[1];
+    const float pktQy = -pkt->imu_orientation_quat[2];
+    const float pktQz = -pkt->imu_orientation_quat[3];
+    static const float k = 0.70710678f; // cos(π/4) = sin(π/4) = √2/2
+    const float attQw = k * (pktQw - pktQz);
+    const float attQx = k * (pktQx - pktQy);
+    const float attQy = k * (pktQy + pktQx);
+    const float attQz = k * (pktQz + pktQw);
+#else
+    // Legacy bridges send the body-to-world quaternion directly
+    const float attQw = pkt->imu_orientation_quat[0];
+    const float attQx = pkt->imu_orientation_quat[1];
+    const float attQy = pkt->imu_orientation_quat[2];
+    const float attQz = pkt->imu_orientation_quat[3];
+#endif
+
+#if defined(USE_VIRTUAL_MAG)
+    {
+        // Synthetic earth field, NWU, 4096 counts: 60° inclination and 2° east
+        // declination so every body component is generically nonzero
+        // (compassEnabledAndCalibrated requires nonzero x, y and z). The 2°
+        // heading bias is negligible against scenario tolerances; the vertical
+        // component is ignored by imuCalcMagErr's horizontal projection.
+        static const float fieldN = 2046.8f;
+        static const float fieldW = -71.5f;
+        static const float fieldU = -3547.2f;
+        // v_body = R(q)^T * v_world
+        const float r00 = 1.0f - 2.0f * (attQy * attQy + attQz * attQz);
+        const float r01 = 2.0f * (attQx * attQy - attQw * attQz);
+        const float r02 = 2.0f * (attQx * attQz + attQw * attQy);
+        const float r10 = 2.0f * (attQx * attQy + attQw * attQz);
+        const float r11 = 1.0f - 2.0f * (attQx * attQx + attQz * attQz);
+        const float r12 = 2.0f * (attQy * attQz - attQw * attQx);
+        const float r20 = 2.0f * (attQx * attQz - attQw * attQy);
+        const float r21 = 2.0f * (attQy * attQz + attQw * attQx);
+        const float r22 = 1.0f - 2.0f * (attQx * attQx + attQy * attQy);
+        const float magX = r00 * fieldN + r10 * fieldW + r20 * fieldU;
+        const float magY = r01 * fieldN + r11 * fieldW + r21 * fieldU;
+        const float magZ = r02 * fieldN + r12 * fieldW + r22 * fieldU;
+        virtualMagSet(lrintf(magX), lrintf(magY), lrintf(magZ));
+    }
+#endif
+
+#if !defined(USE_IMU_CALC)
+#if defined(SET_IMU_FROM_EULER)
+    // set from Euler
+    double qw = pkt->imu_orientation_quat[0];
+    double qx = pkt->imu_orientation_quat[1];
+    double qy = pkt->imu_orientation_quat[2];
+    double qz = pkt->imu_orientation_quat[3];
+    double ysqr = qy * qy;
+    double xf, yf, zf;
+
+    // roll (x-axis rotation)
+    double t0 = +2.0 * (qw * qx + qy * qz);
+    double t1 = +1.0 - 2.0 * (qx * qx + ysqr);
+    xf = atan2(t0, t1) * RAD2DEG;
+
+    // pitch (y-axis rotation)
+    double t2 = +2.0 * (qw * qy - qz * qx);
+    t2 = t2 > 1.0 ? 1.0 : t2;
+    t2 = t2 < -1.0 ? -1.0 : t2;
+    yf = asin(t2) * RAD2DEG; // from wiki
+
+    // yaw (z-axis rotation)
+    double t3 = +2.0 * (qw * qz + qx * qy);
+    double t4 = +1.0 - 2.0 * (ysqr + qz * qz);
+    zf = atan2(t3, t4) * RAD2DEG;
+    imuSetAttitudeRPY(xf, -yf, zf); // yes! pitch was inverted!!
+#else
+    imuSetAttitudeQuat(attQw, attQx, attQy, attQz);
+#endif
+#endif
+
+#if defined(USE_VIRTUAL_GPS)
+    const double longitude = pkt->position_xyz[0];
+    const double latitude = pkt->position_xyz[1];
+    const double altitude = pkt->position_xyz[2];
+
+
+#if ENABLE_GAZEBO_BRIDGE
+    // Gazebo Harmonic's SphericalFromLocalPosition inverts horizontal position
+    // deltas: moving East in the ENU world frame produces DECREASING longitude,
+    // and moving North produces DECREASING latitude. Mirror the GPS position
+    // around the initial origin to correct this 180° horizontal inversion.
+    // Assumes the first FDM packet arrives while the vehicle is at its spawn
+    // position; attach the simulator before starting the world to guarantee
+    // this. A cleaner fix is to have the Gazebo plugin pass the world origin
+    // in fdm_packet — left as a follow-up.
+    static double originLat = 0, originLon = 0;
+    static bool gpsOriginSet = false;
+    if (!gpsOriginSet) {
+        originLat = latitude;
+        originLon = longitude;
+        gpsOriginSet = true;
+    }
+    const double correctedLat = 2.0 * originLat - latitude;
+    const double correctedLon = 2.0 * originLon - longitude;
+#else
+    const double correctedLat = latitude;
+    const double correctedLon = longitude;
+#endif
+
+    const double speed = sqrt(sq(pkt->velocity_xyz[0]) + sq(pkt->velocity_xyz[1]));
+    const double speed3D = sqrt(sq(pkt->velocity_xyz[0]) + sq(pkt->velocity_xyz[1]) + sq(pkt->velocity_xyz[2]));
+    // Plugin provides ENU velocity when spherical coords configured: [0]=East, [1]=North.
+    // Course = atan2(East, North) gives standard aviation bearing from North, clockwise.
+    double course = atan2(pkt->velocity_xyz[0], pkt->velocity_xyz[1]) * RAD2DEG;
+    if (course < 0.0) {
+        course += 360.0;
+    }
+    // velocity_xyz is ENU: NED velN = [1], velE = [0], velD = -[2]
+    // Out-of-range lat/lon is a test-harness sentinel for GPS loss: skip the
+    // update so the virtual GPS goes stale. Kept as a range check because
+    // -ffast-math folds isnan() to false. Real bridges send valid coordinates.
+    if (fabs(latitude) <= 90.0 && fabs(longitude) <= 180.0) {
+        setVirtualGPS(correctedLat, correctedLon, altitude, speed, speed3D, course,
+                      pkt->velocity_xyz[1], pkt->velocity_xyz[0], -pkt->velocity_xyz[2]);
+    }
+
+    if (gpxEnabled) {
+        static uint64_t lastGpxTimeUs = 0;
+        if (realtime_now - lastGpxTimeUs >= 1000000) {
+            lastGpxTimeUs = realtime_now;
+            gpxTrackWrite(correctedLat, correctedLon, altitude);
+        }
+    }
+#endif
+
+#if ENABLE_SIMULATOR_IMU_SYNC
+    imuSetHasNewData(deltaSim*1e6);
+    imuUpdateAttitude(micros());
+#endif
+
+    if (deltaSim < 0.02 && deltaSim > 0) { // simulator should run faster than 50Hz
+//        simRate = simRate * 0.5 + (1e6 * deltaSim / (realtime_now - last_realtime)) * 0.5;
+        struct timespec out_ts;
+        timeval_sub(&out_ts, &now_ts, &last_ts);
+        simRate = deltaSim / (out_ts.tv_sec + 1e-9*out_ts.tv_nsec);
+
+        last_ts.tv_sec = now_ts.tv_sec;
+        last_ts.tv_nsec = now_ts.tv_nsec;
+    } else if (deltaSim >= 0.02) {
+        last_ts.tv_sec  = now_ts.tv_sec;
+        last_ts.tv_nsec = now_ts.tv_nsec;
+    }
+//    printf("simRate = %lf, millis64 = %lu, millis64_real = %lu, deltaSim = %lf\n", simRate, millis64(), millis64_real(), deltaSim*1e6);
+
+    last_timestamp = pkt->timestamp;
+    last_realtime = micros64_real();
+
+    // Periodic status (about 1 Hz)
+    static uint64_t lastDebugTimeUs = 0;
+    if (realtime_now - lastDebugTimeUs >= 1000000) {
+        lastDebugTimeUs = realtime_now;
+
+        const armingDisableFlags_e flags = getArmingDisableFlags();
+        if (flags) {
+            printf("[SITL] t=%dms Arming disabled:", (int)millis());
+            for (unsigned i = 0; i < ARMING_DISABLE_FLAGS_COUNT; i++) {
+                const armingDisableFlags_e flag = (1 << i);
+                if (flags & flag) {
+                    printf(" %s", getArmingDisableFlagName(flag));
+                }
+            }
+            printf("\n");
+        }
+
+#if defined(USE_GPS)
+        printf("[SITL] t=%dms  spd=%.2fm/s  pos=(%d,%d)  alt=%.2fm  att=(%.1f,%.1f,%.1f)",
+            (int)millis(),
+            (double)gpsSol.groundSpeed * 0.01,
+            gpsSol.llh.lat, gpsSol.llh.lon,
+            (double)getAltitudeCm() * 0.01,
+            (double)attitude.values.roll * 0.1,
+            (double)attitude.values.pitch * 0.1,
+            (double)attitude.values.yaw * 0.1);
+        printf("\n");
+#endif
+    }
+
+    pthread_mutex_unlock(&updateLock); // can send PWM output now
+
+#if ENABLE_SIMULATOR_GYROPID_SYNC
+    pthread_mutex_unlock(&mainLoopLock); // can run main loop
+#endif
+}
+
+static void* udpThread(void* data)
+{
+    UNUSED(data);
+    int n = 0;
+
+    while (workerRunning) {
+        n = udpRecv(&stateLink, &fdmPkt, sizeof(fdm_packet), 100);
+        if (n == sizeof(fdm_packet)) {
+            if (!fdm_received) {
+                printf("[SITL] new fdm %d t:%f from %s:%d\n", n, fdmPkt.timestamp, inet_ntoa(stateLink.recv.sin_addr), stateLink.recv.sin_port);
+                fdm_received = true;
+            }
+            updateState(&fdmPkt);
+        }
+    }
+
+    printf("udpThread end!!\n");
+    return NULL;
+}
+
+static void *udpRCThread(void *data)
+{
+    UNUSED(data);
+    int n = 0;
+
+    while (workerRunning) {
+        n = udpRecv(&rcLink, &rcPkt, sizeof(rc_packet), 100);
+        if (n == sizeof(rc_packet)) {
+            if (!rc_received) {
+                printf("[SITL] new rc %d: t:%f AETR: %d %d %d %d AUX1-4: %d %d %d %d\n", n, rcPkt.timestamp,
+                    rcPkt.channels[0], rcPkt.channels[1],rcPkt.channels[2],rcPkt.channels[3],
+                    rcPkt.channels[4], rcPkt.channels[5],rcPkt.channels[6],rcPkt.channels[7]);
+
+                rc_received = true;
+            }
+            rxUpdateUdpChannels(rcPkt.channels, SIMULATOR_MAX_RC_CHANNELS);
+        }
+    }
+
+    printf("udpRCThread end!!\n");
+    return NULL;
+}
+
+static void* tcpThread(void* data)
+{
+    UNUSED(data);
+
+    dyad_init();
+    dyad_setTickInterval(0.2f);
+    dyad_setUpdateTimeout(0.01f);
+
+    while (workerRunning) {
+        dyad_update();
+    }
+
+    dyad_shutdown();
+    printf("tcpThread end!!\n");
+    return NULL;
+}
+
+// system
+void systemInit(void)
+{
+    int ret;
+
+    clock_gettime(CLOCK_MONOTONIC, &start_time);
+    printf("[system]Init...\n");
+
+    // Close the GPX track file cleanly on exit
+    atexit(gpxTrackClose);
+
+    SystemCoreClock = 500 * 1e6; // virtual 500MHz
+
+    if (pthread_mutex_init(&updateLock, NULL) != 0) {
+        printf("Create updateLock error!\n");
+        exit(1);
+    }
+
+    if (pthread_mutex_init(&mainLoopLock, NULL) != 0) {
+        printf("Create mainLoopLock error!\n");
+        exit(1);
+    }
+
+    ret = pthread_create(&tcpWorker, NULL, tcpThread, NULL);
+    if (ret != 0) {
+        printf("Create tcpWorker error!\n");
+        exit(1);
+    }
+
+    ret = udpInit(&pwmLink, simulator_ip, PORT_PWM, false);
+    printf("[SITL] init PwmOut UDP link to gazebo %s:%d...%d\n", simulator_ip, PORT_PWM, ret);
+
+    ret = udpInit(&pwmRawLink, simulator_ip, PORT_PWM_RAW, false);
+    printf("[SITL] init PwmOut UDP link to RF9 %s:%d...%d\n", simulator_ip, PORT_PWM_RAW, ret);
+
+    ret = udpInit(&stateLink, NULL, PORT_STATE, true);
+    printf("[SITL] start UDP server @%d...%d\n", PORT_STATE, ret);
+
+    ret = udpInit(&rcLink, NULL, PORT_RC, true);
+    printf("[SITL] start UDP server for RC input @%d...%d\n", PORT_RC, ret);
+
+    ret = pthread_create(&udpWorker, NULL, udpThread, NULL);
+    if (ret != 0) {
+        printf("Create udpWorker error!\n");
+        exit(1);
+    }
+
+    ret = pthread_create(&udpWorkerRC, NULL, udpRCThread, NULL);
+    if (ret != 0) {
+        printf("Create udpRCThread error!\n");
+        exit(1);
+    }
+}
+
+void systemReset(void)
+{
+    printf("[system]Reset!\n");
+    workerRunning = false;
+    pthread_join(tcpWorker, NULL);
+    pthread_join(udpWorker, NULL);
+    exit(0);
+}
+void systemResetToBootloader(bootloaderRequestType_e requestType)
+{
+    UNUSED(requestType);
+
+    printf("[system]ResetToBootloader!\n");
+    workerRunning = false;
+    pthread_join(tcpWorker, NULL);
+    pthread_join(udpWorker, NULL);
+    exit(0);
+}
+
+void timerInit(void)
+{
+    printf("[timer]Init...\n");
+}
+
+void failureMode(failureMode_e mode)
+{
+    printf("[failureMode]!!! %d\n", mode);
+    while (1);
+}
+
+void indicateFailure(failureMode_e mode, int repeatCount)
+{
+    UNUSED(repeatCount);
+    printf("Failure LED flash for: [failureMode]!!! %d\n", mode);
+}
+
+// Time part
+// Thanks ArduPilot
+uint64_t nanos64_real(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (ts.tv_sec*1e9 + ts.tv_nsec) - (start_time.tv_sec*1e9 + start_time.tv_nsec);
+}
+
+uint64_t micros64_real(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return 1.0e6*((ts.tv_sec + (ts.tv_nsec*1.0e-9)) - (start_time.tv_sec + (start_time.tv_nsec*1.0e-9)));
+}
+
+uint64_t millis64_real(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return 1.0e3*((ts.tv_sec + (ts.tv_nsec*1.0e-9)) - (start_time.tv_sec + (start_time.tv_nsec*1.0e-9)));
+}
+
+uint64_t micros64(void)
+{
+    static uint64_t last = 0;
+    static uint64_t out = 0;
+    uint64_t now = nanos64_real();
+
+    out += (now - last) * simRate;
+    last = now;
+
+    return out / 1000;
+}
+
+uint64_t millis64(void)
+{
+    static uint64_t last = 0;
+    static uint64_t out = 0;
+    uint64_t now = nanos64_real();
+
+    out += (now - last) * simRate;
+    last = now;
+
+    return out / (1000 * 1000);
+}
+
+uint32_t micros(void)
+{
+    return micros64() & 0xFFFFFFFF;
+}
+
+uint32_t millis(void)
+{
+    return millis64() & 0xFFFFFFFF;
+}
+
+int32_t clockCyclesToMicros(int32_t clockCycles)
+{
+    return clockCycles;
+}
+
+int32_t clockCyclesTo10thMicros(int32_t clockCycles)
+{
+    return clockCycles;
+}
+
+int32_t clockCyclesTo100thMicros(int32_t clockCycles)
+{
+    return clockCycles;
+}
+
+uint32_t clockMicrosToCycles(uint32_t micros)
+{
+    return micros;
+}
+
+uint32_t getCycleCounter(void)
+{
+    return (uint32_t) (micros64() & 0xFFFFFFFF);
+}
+
+static void microsleep(uint32_t usec)
+{
+    struct timespec ts;
+    ts.tv_sec = 0;
+    ts.tv_nsec = usec*1000UL;
+    while (nanosleep(&ts, &ts) == -1 && errno == EINTR) ;
+}
+
+void delayMicroseconds(uint32_t us)
+{
+    microsleep(us / simRate);
+}
+
+void delayMicroseconds_real(uint32_t us)
+{
+    microsleep(us);
+}
+
+void delay(uint32_t ms)
+{
+    uint64_t start = millis64();
+
+    while ((millis64() - start) < ms) {
+        microsleep(1000);
+    }
+}
+
+// Subtract the ‘struct timespec’ values X and Y,  storing the result in RESULT.
+// Return 1 if the difference is negative, otherwise 0.
+// result = x - y
+// from: http://www.gnu.org/software/libc/manual/html_node/Elapsed-Time.html
+int timeval_sub(struct timespec *result, struct timespec *x, struct timespec *y)
+{
+    unsigned int s_carry = 0;
+    unsigned int ns_carry = 0;
+    // Perform the carry for the later subtraction by updating y.
+    if (x->tv_nsec < y->tv_nsec) {
+        int nsec = (y->tv_nsec - x->tv_nsec) / 1000000000 + 1;
+        ns_carry += 1000000000 * nsec;
+        s_carry += nsec;
+    }
+
+    // Compute the time remaining to wait. tv_usec is certainly positive.
+    result->tv_sec = x->tv_sec - y->tv_sec - s_carry;
+    result->tv_nsec = x->tv_nsec - y->tv_nsec + ns_carry;
+
+    // Return 1 if result is negative.
+    return x->tv_sec < y->tv_sec;
+}
+
+// PWM part
+static pwmOutputPort_t servos[MAX_SUPPORTED_SERVOS];
+
+// real value to send
+static int16_t motorsPwm[MAX_SUPPORTED_MOTORS];
+static int16_t servosPwm[MAX_SUPPORTED_SERVOS];
+static int16_t idlePulse;
+
+void servoDevInit(const servoDevConfig_t *servoConfig)
+{
+    printf("[SITL] Init servos num %d rate %d center %d\n", MAX_SUPPORTED_SERVOS,
+           servoConfig->servoPwmRate, servoConfig->servoCenterPulse);
+    for (uint8_t servoIndex = 0; servoIndex < MAX_SUPPORTED_SERVOS; servoIndex++) {
+        servos[servoIndex].enabled = true;
+    }
+}
+
+pwmOutputPort_t *pwmGetMotors(void)
+{
+    return pwmMotors;
+}
+
+static float pwmConvertFromExternal(uint16_t externalValue)
+{
+    return (float)externalValue;
+}
+
+static uint16_t pwmConvertToExternal(float motorValue)
+{
+    return (uint16_t)motorValue;
+}
+
+static void pwmDisableMotors(void)
+{
+    // NOOP
+}
+
+static void pwmWriteMotor(uint8_t index, float value)
+{
+    if (index < MAX_SUPPORTED_MOTORS) {
+        motorsPwm[index] = value - idlePulse;
+    }
+
+    if (index < pwmRawPkt.motorCount) {
+        pwmRawPkt.pwm_output_raw[index] = value;
+    }
+}
+
+static void pwmWriteMotorInt(uint8_t index, uint16_t value)
+{
+    pwmWriteMotor(index, (float)value);
+}
+
+static void pwmShutdownPulsesForAllMotors(void)
+{
+    // NOOP
+}
+
+static void pwmCompleteMotorUpdate(void)
+{
+    // send to simulator
+    // for gazebo8 ArduCopterPlugin remap, normal range = [0.0, 1.0], 3D rang = [-1.0, 1.0]
+
+    double outScale = 1000.0;
+    if (featureIsEnabled(FEATURE_3D)) {
+        outScale = 500.0;
+    }
+
+    for (int i = 0; i < 4; i++) {
+        pwmPkt.motor_speed[i] = motorsPwm[i] / outScale;
+    }
+
+    // get one "fdm_packet" can only send one "servo_packet"!!
+    if (pthread_mutex_trylock(&updateLock) != 0) return;
+    udpSend(&pwmLink, &pwmPkt, sizeof(servo_packet));
+    udpSend(&pwmRawLink, &pwmRawPkt, sizeof(servo_packet_raw));
+}
+
+void servoWrite(uint8_t index, float value)
+{
+    servosPwm[index] = value;
+    if (index + pwmRawPkt.motorCount < SIMULATOR_MAX_PWM_CHANNELS) {
+        // In pwmRawPkt, we put servo right after the motors.
+        pwmRawPkt.pwm_output_raw[index + pwmRawPkt.motorCount] = value;
+    }
+}
+
+static const motorVTable_t vTable = {
+    .postInit = motorPostInitNull,
+    .convertExternalToMotor = pwmConvertFromExternal,
+    .convertMotorToExternal = pwmConvertToExternal,
+    .enable = pwmEnableMotors,
+    .disable = pwmDisableMotors,
+    .isMotorEnabled = pwmIsMotorEnabled,
+    .decodeTelemetry = motorDecodeTelemetryNull,
+    .write = pwmWriteMotor,
+    .writeInt = pwmWriteMotorInt,
+    .updateComplete = pwmCompleteMotorUpdate,
+    .shutdown = pwmShutdownPulsesForAllMotors,
+    .requestTelemetry = NULL,
+    .isMotorIdle = NULL,
+    .getMotorIO = NULL,
+};
+
+bool motorPwmDevInit(motorDevice_t *device, const motorDevConfig_t *motorConfig, uint16_t _idlePulse)
+{
+    UNUSED(motorConfig);
+
+    if (!device) {
+        return false;
+    }
+
+    pwmMotorCount = device->count;
+    device->vTable = &vTable;
+
+    printf("Initialized motor count %d\n", pwmMotorCount);
+    pwmRawPkt.motorCount = pwmMotorCount;
+
+    idlePulse = _idlePulse;
+
+    for (int motorIndex = 0; motorIndex < MAX_SUPPORTED_MOTORS && motorIndex < pwmMotorCount; motorIndex++) {
+        pwmMotors[motorIndex].enabled = true;
+    }
+
+    return true;
+}
+
+// stack part
+char _estack;
+char _Min_Stack_Size;
+
+// virtual EEPROM
+static FILE *eepromFd = NULL;
+
+bool loadEEPROMFromFile(void)
+{
+    if (eepromFd != NULL) {
+        fprintf(stderr, "[FLASH_Unlock] eepromFd != NULL\n");
+        return false;
+    }
+
+    // open or create
+    eepromFd = fopen(EEPROM_FILENAME, "r+");
+    if (eepromFd != NULL) {
+        // obtain file size:
+        fseek(eepromFd, 0, SEEK_END);
+        size_t lSize = ftell(eepromFd);
+        rewind(eepromFd);
+
+        size_t n = fread(eepromData, 1, sizeof(eepromData), eepromFd);
+        if (n == lSize) {
+            printf("[FLASH_Unlock] loaded '%s', size = %ld / %ld\n", EEPROM_FILENAME, lSize, sizeof(eepromData));
+        } else {
+            fprintf(stderr, "[FLASH_Unlock] failed to load '%s'\n", EEPROM_FILENAME);
+            return false;
+        }
+    } else {
+        printf("[FLASH_Unlock] created '%s', size = %ld\n", EEPROM_FILENAME, sizeof(eepromData));
+        if ((eepromFd = fopen(EEPROM_FILENAME, "w+")) == NULL) {
+            fprintf(stderr, "[FLASH_Unlock] failed to create '%s'\n", EEPROM_FILENAME);
+            return false;
+        }
+
+        if (fwrite(eepromData, sizeof(eepromData), 1, eepromFd) != 1) {
+            fprintf(stderr, "[FLASH_Unlock] write failed: %s\n", strerror(errno));
+            return false;
+        }
+    }
+    return true;
+}
+
+void configUnlock(void)
+{
+    loadEEPROMFromFile();
+}
+
+void configLock(void)
+{
+    // flush & close
+    if (eepromFd != NULL) {
+        fseek(eepromFd, 0, SEEK_SET);
+        fwrite(eepromData, 1, sizeof(eepromData), eepromFd);
+        fclose(eepromFd);
+        eepromFd = NULL;
+        printf("[FLASH_Lock] saved '%s'\n", EEPROM_FILENAME);
+    } else {
+        fprintf(stderr, "[FLASH_Lock] eeprom is not unlocked\n");
+    }
+}
+
+configStreamerResult_e configWriteWord(uintptr_t address, config_streamer_buffer_type_t *buffer)
+{
+    STATIC_ASSERT(CONFIG_STREAMER_BUFFER_SIZE == sizeof(uint32_t), "CONFIG_STREAMER_BUFFER_SIZE does not match written size");
+
+    if ((address >= (uintptr_t)eepromData) && (address + sizeof(uint32_t) <= (uintptr_t)ARRAYEND(eepromData))) {
+        memcpy((void*)address, buffer, sizeof(config_streamer_buffer_type_t));
+        printf("[FLASH_ProgramWord]%p = %08x\n", (void*)address, *((uint32_t*)address));
+    } else {
+        printf("[FLASH_ProgramWord]%p out of range!\n", (void*)address);
+    }
+    return CONFIG_RESULT_SUCCESS;
+}
+
+void IOConfigGPIO(IO_t io, ioConfig_t cfg)
+{
+    UNUSED(io);
+    UNUSED(cfg);
+    printf("IOConfigGPIO\n");
+}
+
+void spektrumBind(rxConfig_t *rxConfig)
+{
+    UNUSED(rxConfig);
+    printf("spektrumBind\n");
+}
+
+void debugInit(void)
+{
+    printf("debugInit\n");
+}
+
+void unusedPinsInit(void)
+{
+    printf("unusedPinsInit\n");
+}
+
+void IOHi(IO_t io)
+{
+    UNUSED(io);
+}
+
+void IOLo(IO_t io)
+{
+    UNUSED(io);
+}
+
+void IOInitGlobal(void)
+{
+    // NOOP
+}
+
+IO_t IOGetByTag(ioTag_t tag)
+{
+    UNUSED(tag);
+    return NULL;
+}
+
+bool usbCableIsInserted(void)
+{
+    return false;
+}
+
+bool usbCableIsActive(void)
+{
+    return false;
+}
+
+void EXTIInit(void)
+{
+    // NOOP
+}
+
+void uartPinConfigure(const serialPinConfig_t *pSerialPinConfig)
+{
+    UNUSED(pSerialPinConfig);
+}

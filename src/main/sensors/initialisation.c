@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdbool.h>
@@ -23,59 +26,88 @@
 
 #include "common/utils.h"
 
+#include "config/config.h"
 #include "config/feature.h"
-#include "config/parameter_group.h"
-#include "config/parameter_group_ids.h"
 
-#include "fc/config.h"
+#include "drivers/barometer/barometer_spa06_probe.h"
+
 #include "fc/runtime_config.h"
 
-#include "sensors/sensors.h"
+#include "flight/pid.h"
+
+#include "pg/pg.h"
+#include "pg/pg_ids.h"
+
 #include "sensors/acceleration.h"
+#include "sensors/adcinternal.h"
 #include "sensors/barometer.h"
-#include "sensors/gyro.h"
 #include "sensors/compass.h"
-#include "sensors/sonar.h"
+#include "sensors/gyro.h"
+#include "sensors/gyro_init.h"
 #include "sensors/initialisation.h"
+#include "sensors/rangefinder.h"
+#include "sensors/sensors.h"
+#include "sensors/opticalflow.h"
+#include "sensors/pitot.h"
 
-uint8_t detectedSensors[SENSOR_INDEX_COUNT] = { GYRO_NONE, ACC_NONE, BARO_NONE, MAG_NONE };
+uint8_t detectedSensors[SENSOR_INDEX_COUNT] = { GYRO_NONE, ACC_NONE, BARO_NONE, MAG_NONE, RANGEFINDER_NONE, OPTICALFLOW_NONE, PITOT_NONE};
+uint8_t detectedGyros[GYRO_COUNT];
 
-
-#ifdef SONAR
-static bool sonarDetect(void)
+void sensorsPreInit(void)
 {
-    if (feature(FEATURE_SONAR)) {
-        // the user has set the sonar feature, so assume they have an HC-SR04 plugged in,
-        // since there is no way to detect it
-        sensorsSet(SENSOR_SONAR);
-        return true;
-    }
-    return false;
-}
+    memset(detectedGyros, 0, sizeof(detectedGyros));
+
+    gyroPreInit();
+
+#ifdef USE_MAG
+    compassPreInit();
 #endif
+
+#ifdef USE_BARO
+    baroPreInit();
+#endif
+}
 
 bool sensorsAutodetect(void)
 {
+
     // gyro must be initialised before accelerometer
-    if (!gyroInit()) {
-        return false;
+
+    bool gyroDetected = gyroInit();
+
+#ifdef USE_ACC
+    if (gyroDetected) {
+        accInit(gyro.accSampleRateHz);
     }
+#endif
 
-    accInit(gyro.targetLooptime);
+#ifdef USE_BARO
+    baroInit();
+#endif
 
-#ifdef MAG
+#if ENABLE_BARO_SPA06_PROBE
+    spa06ProbeRun();
+#endif
+
+#ifdef USE_MAG
     compassInit();
 #endif
 
-#ifdef BARO
-    baroDetect(&baro.dev, barometerConfig()->baro_hardware);
+#ifdef USE_RANGEFINDER
+    rangefinderInit();
 #endif
 
-#ifdef SONAR
-    if (sonarDetect()) {
-        sonarInit(sonarConfig());
-    }
+#ifdef USE_OPTICALFLOW
+    opticalflowInit();
 #endif
 
-    return true;
+#ifdef USE_PITOT
+    pitotInit();
+#endif
+
+#ifdef USE_ADC_INTERNAL
+    adcInternalInit();
+#endif
+
+    return gyroDetected;
 }

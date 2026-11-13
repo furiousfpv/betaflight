@@ -1,18 +1,21 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 // This file borrows heavily from project Deviation,
@@ -22,14 +25,17 @@
 #include <stdint.h>
 #include <string.h>
 
-#include <platform.h>
+#include "platform.h"
 
 #ifdef USE_RX_SYMA
 
 #include "build/build_config.h"
 
-#include "drivers/rx_nrf24l01.h"
-#include "drivers/system.h"
+#include "pg/rx.h"
+
+#include "drivers/io.h"
+#include "drivers/rx/rx_nrf24l01.h"
+#include "drivers/time.h"
 
 #include "rx/rx.h"
 #include "rx/rx_spi.h"
@@ -41,7 +47,6 @@
  * This means binding phase lasts 1.4 seconds, the transmitter then enters the data phase.
  * Other transmitters may vary but should have similar characteristics.
  */
-
 
 /*
  * SymaX Protocol
@@ -144,14 +149,14 @@ STATIC_UNIT_TESTED bool symaCheckBindPacket(const uint8_t *packet)
 STATIC_UNIT_TESTED uint16_t symaConvertToPwmUnsigned(uint8_t val)
 {
     uint32_t ret = val;
-    ret = ret * (PWM_RANGE_MAX - PWM_RANGE_MIN) / UINT8_MAX + PWM_RANGE_MIN;
+    ret = ret * PWM_RANGE / UINT8_MAX + PWM_RANGE_MIN;
     return (uint16_t)ret;
 }
 
 STATIC_UNIT_TESTED uint16_t symaConvertToPwmSigned(uint8_t val)
 {
     int32_t ret = val & 0x7f;
-    ret = (ret * (PWM_RANGE_MAX - PWM_RANGE_MIN)) / (2 * INT8_MAX);
+    ret = ret * PWM_RANGE / (2 * INT8_MAX);
     if (val & 0x80) {// sign bit set
         ret = -ret;
     }
@@ -268,7 +273,7 @@ rx_spi_received_e symaNrf24DataReceived(uint8_t *payload)
 static void symaNrf24Setup(rx_spi_protocol_e protocol)
 {
     symaProtocol = protocol;
-    NRF24L01_Initialize(BV(NRF24L01_00_CONFIG_EN_CRC) | BV( NRF24L01_00_CONFIG_CRCO)); // sets PWR_UP, EN_CRC, CRCO - 2 byte CRC
+    NRF24L01_Initialize(BIT(NRF24L01_00_CONFIG_EN_CRC) | BIT( NRF24L01_00_CONFIG_CRCO)); // sets PWR_UP, EN_CRC, CRCO - 2 byte CRC
     NRF24L01_SetupBasic();
 
     if (symaProtocol == RX_SPI_NRF24_SYMA_X) {
@@ -293,10 +298,13 @@ static void symaNrf24Setup(rx_spi_protocol_e protocol)
     NRF24L01_SetRxMode(); // enter receive mode to start listening for packets
 }
 
-void symaNrf24Init(const rxConfig_t *rxConfig, rxRuntimeConfig_t *rxRuntimeConfig)
+bool symaNrf24Init(const rxSpiConfig_t *rxSpiConfig, rxRuntimeState_t *rxRuntimeState, rxSpiExtiConfig_t *extiConfig)
 {
-    rxRuntimeConfig->channelCount = RC_CHANNEL_COUNT;
-    symaNrf24Setup((rx_spi_protocol_e)rxConfig->rx_spi_protocol);
+    UNUSED(extiConfig);
+
+    rxRuntimeState->channelCount = RC_CHANNEL_COUNT;
+    symaNrf24Setup((rx_spi_protocol_e)rxSpiConfig->rx_spi_protocol);
+
+    return true;
 }
 #endif
-

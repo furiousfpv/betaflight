@@ -1,60 +1,133 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <math.h>
 
-#include "axis.h"
+#include "platform.h"
+
+#include "build/build_config.h"
+
+#include "common/axis.h"
+
 #include "maths.h"
 
-#if defined(FAST_MATH) || defined(VERY_FAST_MATH)
-#if defined(VERY_FAST_MATH)
+#if defined(FAST_MATH)
+static inline float sin_poly5_r(float r, float s)
+{
+    // Pre-scaled for u = r*(π/2)
+    const float c0 =  0x1.921f1cp0f; // 1.5707871913909912109375
+    const float c1 = -0x1.4a974p-1f; // -0.6456851959228515625
+    const float c2 =  0x1.3db294p-4f; // 7.756288349628448486328125e-2
+    return r * ((c2 * s + c1) * s + c0);
+}
 
-// http://lolengine.net/blog/2011/12/21/better-function-approximations
-// Chebyshev http://stackoverflow.com/questions/345085/how-do-trigonometric-functions-work/345117#345117
-// Thanks for ledvinap for making such accuracy possible! See: https://github.com/cleanflight/cleanflight/issues/940#issuecomment-110323384
-// https://github.com/Crashpilot1000/HarakiriWebstore1/blob/master/src/mw.c#L1235
-// sin_approx maximum absolute error = 2.305023e-06
-// cos_approx maximum absolute error = 2.857298e-06
-#define sinPolyCoef3 -1.666568107e-1f
-#define sinPolyCoef5  8.312366210e-3f
-#define sinPolyCoef7 -1.849218155e-4f
-#define sinPolyCoef9  0
-#else
-#define sinPolyCoef3 -1.666665710e-1f                                          // Double: -1.666665709650470145824129400050267289858e-1
-#define sinPolyCoef5  8.333017292e-3f                                          // Double:  8.333017291562218127986291618761571373087e-3
-#define sinPolyCoef7 -1.980661520e-4f                                          // Double: -1.980661520135080504411629636078917643846e-4
-#define sinPolyCoef9  2.600054768e-6f                                          // Double:  2.600054767890361277123254766503271638682e-6
-#endif
+static inline float cos_poly6_r(float s)
+{
+    const float d1 = -0x1.3bd39cp0f; // -1.2336976528167724609375
+    const float d2 =  0x1.03bp-2f; // 0.25360107421875
+    const float d3 = -0x1.4e5eecp-6f; // -2.04083733260631561279296875e-2
+    return ((d3 * s + d2) * s + d1) * s + 1.0f;
+}
+
+// ---- Range reduction ----
+static inline void range_reduce(float x, float *restrict r_out, int *restrict q_out)
+{
+    float t  = x * INV_PIO2;
+    float qf = roundf(t);
+    *q_out   = (int)qf;
+    *r_out   = t - qf;
+}
+
+// ---- Quadrant mapping helpers ----
+// r ∈ [-0.5, 0.5], q is quadrant index (…,-1,0,1,2,3,4,…).
+static inline float sinf_quadrant_r(float r, int q)
+{
+    float s = r * r;
+
+    q &= 3;
+    if (q & 1) { // odd: use cos, sign handled below
+        float v = cos_poly6_r(s);
+        return (q & 2) ? -v : v;
+    } else {     // even: use sin
+        float v = sin_poly5_r(r, s);
+        return (q & 2) ? -v : v;
+    }
+}
+
+static inline float cosf_quadrant_r(float r, int q)
+{
+    float s = r * r;
+
+    q &= 3;
+    if (q & 1) { // odd: -sin, sign handled below
+        float v = -sin_poly5_r(r, s);
+        return (q & 2) ? -v : v;   // q=1 -> -sin, q=3 -> +sin
+    } else {     // even: cos
+        float v = cos_poly6_r(s);
+        return (q & 2) ? -v : v;   // q=2 -> -cos
+    }
+}
+
+static inline void sincosf_quadrant_r(float r, int q, float *restrict out_s, float *restrict out_c)
+{
+    float s = r * r;
+
+    q &= 3;
+    float sb = sin_poly5_r(r, s);
+    float cb = cos_poly6_r(s);
+
+    // map to base values in registers
+    float sv = (q & 1) ? cb  : sb;   // odd quadrants: use cos
+    float cv = (q & 1) ? -sb : cb;   // odd quadrants: cos->sin mapping
+
+    // flip signs for quadrants 2 and 3
+    if (q & 2) { sv = -sv; cv = -cv; }
+
+    *out_s = sv;
+    *out_c = cv;
+}
+
 float sin_approx(float x)
 {
-    int32_t xint = x;
-    if (xint < -32 || xint > 32) return 0.0f;                               // Stop here on error input (5 * 360 Deg)
-    while (x >  M_PIf) x -= (2.0f * M_PIf);                                 // always wrap input angle to -PI..PI
-    while (x < -M_PIf) x += (2.0f * M_PIf);
-    if (x >  (0.5f * M_PIf)) x =  (0.5f * M_PIf) - (x - (0.5f * M_PIf));   // We just pick -90..+90 Degree
-    else if (x < -(0.5f * M_PIf)) x = -(0.5f * M_PIf) - ((0.5f * M_PIf) + x);
-    float x2 = x * x;
-    return x + x * x2 * (sinPolyCoef3 + x2 * (sinPolyCoef5 + x2 * (sinPolyCoef7 + x2 * sinPolyCoef9)));
+    int q; // quadrant index
+    float r; // remainder in [-0.5, 0,5]
+    range_reduce(x, &r, &q);
+    return sinf_quadrant_r(r, q);
 }
 
 float cos_approx(float x)
 {
-    return sin_approx(x + (0.5f * M_PIf));
+    int q; // quadrant index
+    float r; // remainder in [-0.5,]
+    range_reduce(x, &r, &q);
+    return cosf_quadrant_r(r, q);
+}
+
+void sincosf_approx(float x, float *restrict out_s, float *restrict out_c)
+{
+    int q; // quadrant index
+    float r; // remainder in [-0.5,]
+    range_reduce(x, &r, &q);
+    sincosf_quadrant_r(r, q, out_s, out_c);
 }
 
 // Initial implementation by Crashpilot1000 (https://github.com/Crashpilot1000/HarakiriWebstore1/blob/396715f73c6fcf859e0db0f34e12fe44bace6483/src/mw.c#L1292)
@@ -97,25 +170,39 @@ float acos_approx(float x)
     else
         return result;
 }
-#endif
 
-float powerf(float base, int exp) {
-    float result = base;
-    for (int count = 1; count < exp; count++) result *= base;
-
-    return result;
+float asin_approx(float x)
+{
+    return (M_PIf * 0.5f) - acos_approx(x);
 }
 
-int32_t applyDeadband(int32_t value, int32_t deadband)
+#endif
+
+int gcd(int num, int denom)
 {
-    if (ABS(value) < deadband) {
-        value = 0;
-    } else if (value > 0) {
-        value -= deadband;
-    } else if (value < 0) {
-        value += deadband;
+    if (denom == 0) {
+        return num;
     }
-    return value;
+
+    return gcd(denom, num % denom);
+}
+
+int32_t applyDeadband(const int32_t value, const int32_t deadband)
+{
+    if (abs(value) < deadband) {
+        return 0;
+    }
+
+    return value >= 0 ? value - deadband : value + deadband;
+}
+
+float fapplyDeadband(const float value, const float deadband)
+{
+    if (fabsf(value) < deadband) {
+        return 0;
+    }
+
+    return value >= 0 ? value - deadband : value + deadband;
 }
 
 void devClear(stdev_t *dev)
@@ -152,65 +239,31 @@ float degreesToRadians(int16_t degrees)
     return degrees * RAD;
 }
 
-int scaleRange(int x, int srcFrom, int srcTo, int destFrom, int destTo) {
+int scaleRange(int x, int srcFrom, int srcTo, int destFrom, int destTo)
+{
     long int a = ((long int) destTo - (long int) destFrom) * ((long int) x - (long int) srcFrom);
     long int b = (long int) srcTo - (long int) srcFrom;
     return (a / b) + destFrom;
 }
 
-// Normalize a vector
-void normalizeV(struct fp_vector *src, struct fp_vector *dest)
+float scaleRangef(float x, float srcFrom, float srcTo, float destFrom, float destTo)
 {
-    float length;
-
-    length = sqrtf(src->X * src->X + src->Y * src->Y + src->Z * src->Z);
-    if (length != 0) {
-        dest->X = src->X / length;
-        dest->Y = src->Y / length;
-        dest->Z = src->Z / length;
-    }
+    float a = (destTo - destFrom) * (x - srcFrom);
+    float b = srcTo - srcFrom;
+    return (a / b) + destFrom;
 }
 
-void buildRotationMatrix(fp_angles_t *delta, float matrix[3][3])
+void scaleRangefInit(scaleRangef_t *scale, float srcFrom, float srcTo, float destFrom, float destTo)
 {
-    float cosx, sinx, cosy, siny, cosz, sinz;
-    float coszcosx, sinzcosx, coszsinx, sinzsinx;
-
-    cosx = cos_approx(delta->angles.roll);
-    sinx = sin_approx(delta->angles.roll);
-    cosy = cos_approx(delta->angles.pitch);
-    siny = sin_approx(delta->angles.pitch);
-    cosz = cos_approx(delta->angles.yaw);
-    sinz = sin_approx(delta->angles.yaw);
-
-    coszcosx = cosz * cosx;
-    sinzcosx = sinz * cosx;
-    coszsinx = sinx * cosz;
-    sinzsinx = sinx * sinz;
-
-    matrix[0][X] = cosz * cosy;
-    matrix[0][Y] = -cosy * sinz;
-    matrix[0][Z] = siny;
-    matrix[1][X] = sinzcosx + (coszsinx * siny);
-    matrix[1][Y] = coszcosx - (sinzsinx * siny);
-    matrix[1][Z] = -sinx * cosy;
-    matrix[2][X] = (sinzsinx) - (coszcosx * siny);
-    matrix[2][Y] = (coszsinx) + (sinzcosx * siny);
-    matrix[2][Z] = cosy * cosx;
+    float range_src = srcTo - srcFrom;
+    float range_dest = destTo - destFrom;
+    scale->scale = range_dest / range_src;
+    scale->offset = destFrom - (srcFrom * scale->scale);
 }
 
-// Rotate a vector *v by the euler angles defined by the 3-vector *delta.
-void rotateV(struct fp_vector *v, fp_angles_t *delta)
+float scaleRangefApply(scaleRangef_t *scale, float x)
 {
-    struct fp_vector v_tmp = *v;
-
-    float matrix[3][3];
-
-    buildRotationMatrix(delta, matrix);
-
-    v->X = v_tmp.X * matrix[0][X] + v_tmp.Y * matrix[1][X] + v_tmp.Z * matrix[2][X];
-    v->Y = v_tmp.X * matrix[0][Y] + v_tmp.Y * matrix[1][Y] + v_tmp.Z * matrix[2][Y];
-    v->Z = v_tmp.X * matrix[0][Z] + v_tmp.Y * matrix[1][Z] + v_tmp.Z * matrix[2][Z];
+    return (x * scale->scale) + scale->offset;
 }
 
 // Quick median filter implementation
@@ -222,7 +275,7 @@ void rotateV(struct fp_vector *v, fp_angles_t *delta)
 #define QMF_SORTF(a,b) { if ((a)>(b)) QMF_SWAPF((a),(b)); }
 #define QMF_SWAPF(a,b) { float temp=(a);(a)=(b);(b)=temp; }
 
-int32_t quickMedianFilter3(int32_t * v)
+int32_t quickMedianFilter3(const int32_t * v)
 {
     int32_t p[3];
     QMF_COPY(p, v, 3);
@@ -231,7 +284,7 @@ int32_t quickMedianFilter3(int32_t * v)
     return p[1];
 }
 
-int32_t quickMedianFilter5(int32_t * v)
+int32_t quickMedianFilter5(const int32_t * v)
 {
     int32_t p[5];
     QMF_COPY(p, v, 5);
@@ -242,7 +295,7 @@ int32_t quickMedianFilter5(int32_t * v)
     return p[2];
 }
 
-int32_t quickMedianFilter7(int32_t * v)
+int32_t quickMedianFilter7(const int32_t * v)
 {
     int32_t p[7];
     QMF_COPY(p, v, 7);
@@ -255,7 +308,7 @@ int32_t quickMedianFilter7(int32_t * v)
     return p[3];
 }
 
-int32_t quickMedianFilter9(int32_t * v)
+int32_t quickMedianFilter9(const int32_t * v)
 {
     int32_t p[9];
     QMF_COPY(p, v, 9);
@@ -270,7 +323,7 @@ int32_t quickMedianFilter9(int32_t * v)
     return p[4];
 }
 
-float quickMedianFilter3f(float * v)
+float quickMedianFilter3f(const float * v)
 {
     float p[3];
     QMF_COPY(p, v, 3);
@@ -279,7 +332,7 @@ float quickMedianFilter3f(float * v)
     return p[1];
 }
 
-float quickMedianFilter5f(float * v)
+float quickMedianFilter5f(const float * v)
 {
     float p[5];
     QMF_COPY(p, v, 5);
@@ -290,7 +343,7 @@ float quickMedianFilter5f(float * v)
     return p[2];
 }
 
-float quickMedianFilter7f(float * v)
+float quickMedianFilter7f(const float * v)
 {
     float p[7];
     QMF_COPY(p, v, 7);
@@ -303,7 +356,7 @@ float quickMedianFilter7f(float * v)
     return p[3];
 }
 
-float quickMedianFilter9f(float * v)
+float quickMedianFilter9f(const float * v)
 {
     float p[9];
     QMF_COPY(p, v, 9);
@@ -318,59 +371,47 @@ float quickMedianFilter9f(float * v)
     return p[4];
 }
 
-void arraySubInt32(int32_t *dest, int32_t *array1, int32_t *array2, int count)
+void arraySubInt32(int32_t *dest, const int32_t *array1, const int32_t *array2, int count)
 {
     for (int i = 0; i < count; i++) {
         dest[i] = array1[i] - array2[i];
     }
 }
 
-int16_t qPercent(fix12_t q) {
+int16_t qPercent(fix12_t q)
+{
     return (100 * q) >> 12;
 }
 
-int16_t qMultiply(fix12_t q, int16_t input) {
+int16_t qMultiply(fix12_t q, int16_t input)
+{
     return (input *  q) >> 12;
 }
 
-fix12_t  qConstruct(int16_t num, int16_t den) {
+fix12_t  qConstruct(int16_t num, int16_t den)
+{
     return (num << 12) / den;
 }
 
-uint16_t crc16_ccitt(uint16_t crc, unsigned char a)
+// Cubic polynomial blending function
+static float cubicBlend(const float t)
 {
-    crc ^= (uint16_t)a << 8;
-    for (int ii = 0; ii < 8; ++ii) {
-        if (crc & 0x8000) {
-            crc = (crc << 1) ^ 0x1021;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc;
+    return t * t * (3.0f - 2.0f * t);
 }
 
-uint16_t crc16_ccitt_update(uint16_t crc, const void *data, uint32_t length)
+// Smooth step-up transition function from 0 to 1
+float smoothStepUpTransition(const float x, const float center, const float width)
 {
-    const uint8_t *p = (const uint8_t *)data;
-    const uint8_t *pend = p + length;
+    const float half_width = width * 0.5f;
+    const float left_limit = center - half_width;
+    const float right_limit = center + half_width;
 
-    for (; p != pend; p++) {
-        crc = crc16_ccitt(crc, *p);
+    if (x < left_limit) {
+        return 0.0f;
+    } else if (x > right_limit) {
+        return 1.0f;
+    } else {
+        const float t = (x - left_limit) / width; // Normalize x within the range
+        return cubicBlend(t);
     }
-    return crc;
 }
-
-uint8_t crc8_dvb_s2(uint8_t crc, unsigned char a)
-{
-    crc ^= a;
-    for (int ii = 0; ii < 8; ++ii) {
-        if (crc & 0x80) {
-            crc = (crc << 1) ^ 0xD5;
-        } else {
-            crc = crc << 1;
-        }
-    }
-    return crc;
-}
-

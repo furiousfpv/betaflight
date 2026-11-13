@@ -1,0 +1,499 @@
+/*
+ * This file is part of Betaflight.
+ *
+ * Betaflight is free software. You can redistribute this software
+ * and/or modify this software under the terms of the GNU General
+ * Public License as published by the Free Software Foundation,
+ * either version 3 of the License, or (at your option) any later
+ * version.
+ *
+ * Betaflight is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ *
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public
+ * License along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#include "platform.h"
+
+#include "drivers/io.h"
+#include "drivers/serial.h"
+#include "drivers/serial_uart.h"
+#include "drivers/serial_impl.h"
+#include "drivers/serial_uart_impl.h"
+#include "hardware/irq.h"
+#include "hardware/pio.h"
+
+#include "serial_uart_pico.h"
+
+#if SERIAL_PIOUART_COUNT > 0
+
+// PIOUARTs are used in order, starting from PIOUART0
+STATIC_ASSERT(SERIAL_PIOUART_COUNT == SERIAL_PIOUART_MAX, should_be_enforced_PIOUART_COUNT_IS_PIOUART_MAX);
+
+// The PIO block for software UARTs PIOUART0, PIOUART1
+static const PIO uartPio = PIO_INSTANCE(PIO_UART_INDEX);
+
+#define PIO_IRQ_INDEX(irqn) ((irqn) == PIO_IRQ_NUM(uartPio, 0) ? 0 : 1)
+
+typedef struct pioDetails_s {
+    irq_num_t irqn;
+    io_rw_32 *enableReg;
+    io_ro_32 *statusReg;
+    int rxPin; // -1 if the port has no rx pin
+    int txPin; // -1 if the port has no tx pin
+    uint16_t sm_rx; // sm number for rx (0..3)
+    uint16_t sm_tx; // sm number for tx (0..3)
+    uint32_t rx_intr_bit; // bit to check on interrupt enable and status registers for rx not empty
+    uint32_t tx_intr_bit; // bit to check on interrupt enable and status registers for tx not full
+    bool useRx; // an rx state machine has been claimed (sm_rx is valid)
+    bool useTx; // a tx state machine has been claimed (sm_tx is valid)
+    bool halfDuplex; // SERIAL_BIDIR: the rx state machine listens on the tx pin
+} pioDetails_t;
+
+#if SERIAL_PIOUART_COUNT > 2
+#error USE_PIOUARTn only currently supported for n=0,1
+#endif
+
+// Store for details, catering (currently) for PIOUART0, PIOUART1
+static pioDetails_t uartPioDetails[SERIAL_PIOUART_COUNT];
+
+#define UART_PIO_DETAILS_IDX(id) ((id) - SERIAL_PORT_PIOUART_FIRST)
+#define UART_PIO_DETAILS_PTR(id) (&uartPioDetails[UART_PIO_DETAILS_IDX(id)])
+
+// Base for PIO pin counts (0 or 16)
+static int uartPioBase;
+
+static int txProgram_offset = -1;
+static int rxProgram_offset = -1;
+
+// Look-ups for bit to check on status register IRQ[01]_INTS by SM
+static const uint32_t rxnemptybit[4] = {
+    PIO_INTR_SM0_RXNEMPTY_BITS,
+    PIO_INTR_SM1_RXNEMPTY_BITS,
+    PIO_INTR_SM2_RXNEMPTY_BITS,
+    PIO_INTR_SM3_RXNEMPTY_BITS,
+};
+
+static const uint32_t txnfullbit[4] = {
+    PIO_INTR_SM0_TXNFULL_BITS,
+    PIO_INTR_SM1_TXNFULL_BITS,
+    PIO_INTR_SM2_TXNFULL_BITS,
+    PIO_INTR_SM3_TXNFULL_BITS,
+};
+
+// PIO-based UARTs. For now, hardwired to PIOUARTs 0,1 on PIO number UART_PIO_INDEX.
+const pioUartHardware_t pioUartHardware[SERIAL_PIOUART_COUNT] = {
+#ifdef USE_PIOUART0
+    {
+        .identifier = SERIAL_PORT_PIOUART0,
+        .irqn = PIO_IRQ_NUM(uartPio, 0),
+        .txBuffer = uartPio0TxBuffer,
+        .rxBuffer = uartPio0RxBuffer,
+        .txBufferSize = sizeof(uartPio0TxBuffer),
+        .rxBufferSize = sizeof(uartPio0RxBuffer),
+    },
+#endif
+
+#ifdef USE_PIOUART1
+    {
+        .identifier = SERIAL_PORT_PIOUART1,
+        .irqn = PIO_IRQ_NUM(uartPio, 1),
+        .txBuffer = uartPio1TxBuffer,
+        .rxBuffer = uartPio1RxBuffer,
+        .txBufferSize = sizeof(uartPio1TxBuffer),
+        .rxBufferSize = sizeof(uartPio1RxBuffer),
+    },
+#endif
+};
+
+static uartPinDef_t makePinDef(ioTag_t tag)
+{
+    uartPinDef_t ret = { .pin = tag };
+    return ret;
+}
+
+void uartPinConfigure_pio(const serialPinConfig_t *pSerialPinConfig)
+{
+    // software UART by PIO
+    int pinIndexMin = 48;
+    int pinIndexMax = -1;
+    uartPioBase = 0;
+    for (const pioUartHardware_t* hardware = pioUartHardware; hardware < ARRAYEND(pioUartHardware); hardware++) {
+        const serialPortIdentifier_e identifier = hardware->identifier;
+        uartDevice_t* uartdev = uartDeviceFromIdentifier(identifier);
+        const int resourceIndex = serialResourceIndex(identifier);
+        const ioTag_t cfgRx = pSerialPinConfig->ioTagRx[resourceIndex];
+        const ioTag_t cfgTx = pSerialPinConfig->ioTagTx[resourceIndex];
+        bprintf("pico uartPinConfigure pio at %p dev = %p,  tags rx 0x%x, tx 0x%x", hardware, uartdev, cfgRx, cfgTx);
+        if (!cfgRx && !cfgTx) {
+            continue;
+        }
+
+        // On a single PIO block, we are restricted either to pins 0-31 or pins 16-47.
+        pinIndexMin = cfgRx && (DEFIO_TAG_PIN(cfgRx) < pinIndexMin) ? DEFIO_TAG_PIN(cfgRx) : pinIndexMin;
+        pinIndexMax = cfgRx && (DEFIO_TAG_PIN(cfgRx) > pinIndexMax) ? DEFIO_TAG_PIN(cfgRx) : pinIndexMax;
+        pinIndexMin = cfgTx && (DEFIO_TAG_PIN(cfgTx) < pinIndexMin) ? DEFIO_TAG_PIN(cfgTx) : pinIndexMin;
+        pinIndexMax = cfgTx && (DEFIO_TAG_PIN(cfgTx) > pinIndexMax) ? DEFIO_TAG_PIN(cfgTx) : pinIndexMax;
+        if (pinIndexMax >= 32) {
+            if (pinIndexMin < 16) {
+                bprintf("* Not configuring PIOUART with identifier %d (PIO can't span pins min %d max %d)",
+                        identifier, pinIndexMin, pinIndexMax);
+                continue;
+            } else {
+                uartPioBase = 16;
+            }
+        }
+
+        if (cfgRx) {
+            uartdev->rx = makePinDef(cfgRx);
+        }
+
+        if (cfgTx) {
+            uartdev->tx = makePinDef(cfgTx);
+        }
+
+        if (uartdev->rx.pin || uartdev->tx.pin ) {
+            bprintf("uartdev %p setting hardware to %p which has txbuffer %p", uartdev, hardware, hardware->txBuffer);
+            uartdev->hardware = (uartHardware_t *)hardware; // Sneak in pointer to pioUartHardware_t as a pointer to uartHardware_t
+        } else {
+            bprintf("** uartPinConfigure_pio no compatible rx or tx pin for this PIO UART");
+        }
+    }
+
+    bprintf("pico uartPinConfigure pio%d pin min, max = %d, %d; setting gpio base to %d", PIO_NUM(uartPio), pinIndexMin, pinIndexMax, uartPioBase);
+}
+
+void uartSelectFunction_pio(uartPort_t *s, uint32_t gpio)
+{
+    // Select the correct gpio function type on the given gpio pin.
+    UNUSED(s);
+    pio_gpio_init(uartPio, gpio);
+}
+
+bool isTxComplete_pio(uartPort_t *s)
+{
+    const serialPortIdentifier_e identifier = s->port.identifier;
+    pioDetails_t *uartPioDetailsPtr = UART_PIO_DETAILS_PTR(identifier);
+    if (!uartPioDetailsPtr->useTx) {
+        return true; // no tx state machine (receive-only port): nothing to send
+    }
+    uint sm_tx = uartPioDetailsPtr->sm_tx;
+
+    // Test that the FIFO is empty, and we have returned to the blocking PULL instruction.
+    return pio_sm_is_tx_fifo_empty(uartPio, sm_tx) && pio_sm_get_pc(uartPio, sm_tx) == tx_await_offset + txProgram_offset;
+}
+
+static bool ensurePioProgram(PIO pio, const pio_program_t *program, bool isTx)
+{
+    // The GPIO base must be set before adding the program.
+    pio_set_gpio_base(uartPio, uartPioBase);
+
+    if (isTx) {
+        if (txProgram_offset < 0) {
+            txProgram_offset = pio_add_program(pio, program);
+        }
+
+        return txProgram_offset >= 0;
+   } else {
+        if (rxProgram_offset < 0) {
+            rxProgram_offset = pio_add_program(pio, program);
+        }
+
+        return rxProgram_offset >= 0;
+    }
+}
+
+static void uartPioIrqHandler(uartPort_t *s, pioDetails_t *pioDetailsPtr)
+{
+    io_rw_32 *enableRegPtr = pioDetailsPtr->enableReg;
+    io_ro_32 *statusRegPtr = pioDetailsPtr->statusReg;
+    // Is RX enabled and does irq status indicate RX fifo not empty?
+    if (*enableRegPtr & pioDetailsPtr->rx_intr_bit && *statusRegPtr & pioDetailsPtr->rx_intr_bit) {
+        uint sm_rx = pioDetailsPtr->sm_rx;
+
+        // 8-bit read from the uppermost byte of the FIFO, as data is left-justified
+        io_ro_32 *rxfifo_shift = &uartPio->rxf[sm_rx];
+        serialReceiveCallbackPtr rxCallback = s->port.rxCallback;
+        void *rxCallbackData = s->port.rxCallbackData;
+        volatile uint8_t *rxBuffer = s->port.rxBuffer;
+        uint32_t rxBufferSize = s->port.rxBufferSize;
+
+        while (!pio_sm_is_rx_fifo_empty(uartPio, sm_rx)) {
+            const uint8_t ch = *rxfifo_shift >> 24; // left aligned, 8 bits
+
+            if (rxCallback) {
+                rxCallback(ch, rxCallbackData);
+            } else {
+                rxBuffer[s->port.rxBufferHead] = ch;
+                s->port.rxBufferHead = (s->port.rxBufferHead + 1) % rxBufferSize;
+            }
+        }
+    }
+
+    // Is TX enabled and does irq status indicate TX fifo not full?
+    if (*enableRegPtr & pioDetailsPtr->tx_intr_bit && *statusRegPtr & pioDetailsPtr->tx_intr_bit) {
+        uint sm_tx = pioDetailsPtr->sm_tx;
+        while (!pio_sm_is_tx_fifo_full(uartPio, sm_tx)) {
+            if (s->port.txBufferTail != s->port.txBufferHead) {
+                ///bprintf("uartIrqHandler PIO TX put %x", s->port.txBuffer[s->port.txBufferTail]);
+                // Send 8 bits of data in a 32-bit word. The PIO program will emit the low 8 bits.
+                pio_sm_put(uartPio, sm_tx, s->port.txBuffer[s->port.txBufferTail]);
+                s->port.txBufferTail = (s->port.txBufferTail + 1) % s->port.txBufferSize;
+            } else {
+                int irqn_index = PIO_IRQ_INDEX(pioDetailsPtr->irqn);
+                pio_interrupt_source_t irqSourceTX = pio_get_tx_fifo_not_full_interrupt_source(sm_tx);
+                pio_set_irqn_source_enabled(uartPio, irqn_index, irqSourceTX, false);
+                break;
+            }
+        }
+    }
+}
+
+static void on_pioUART0(void)
+{
+///    bprintf("\n\n on_pioUART0");
+#ifdef USE_PIOUART0
+    uartPioIrqHandler(&pioUartDevice[0].port, UART_PIO_DETAILS_PTR(SERIAL_PORT_PIOUART0));
+#endif
+}
+
+static void on_pioUART1(void)
+{
+///    bprintf("\n\n\n\non_pioUART1");
+#ifdef USE_PIOUART1
+    uartPioIrqHandler(&pioUartDevice[1].port, UART_PIO_DETAILS_PTR(SERIAL_PORT_PIOUART1));
+#endif
+}
+
+// A PIO UART takes one state machine per direction, so each is claimed only when the port's mode needs it
+// (e.g. ESC telemetry is receive only). serialSetMode() can add a direction later; uartReconfigure_pio()
+// then claims it.
+static bool claimTxStateMachine(uartPort_t *s, pioDetails_t *uartPioDetailsPtr)
+{
+    if (!ensurePioProgram(uartPio, &uart_tx_program, true /* Tx */)) {
+        bprintf("pico serialUART_pio tx failed to add program to pio");
+        return false;
+    }
+
+    const int pio_sm_tx = pio_claim_unused_sm(uartPio, false);
+    if (pio_sm_tx < 0) {
+        bprintf("pico serialUART_pio tx failed to claim state machine");
+        return false;
+    }
+
+    uartPioDetailsPtr->sm_tx = pio_sm_tx;
+    uartPioDetailsPtr->tx_intr_bit = txnfullbit[pio_sm_tx];
+    uartPioDetailsPtr->useTx = true;
+    uartSelectFunction_pio(s, uartPioDetailsPtr->txPin);
+    return true;
+}
+
+static bool claimRxStateMachine(pioDetails_t *uartPioDetailsPtr)
+{
+    if (!ensurePioProgram(uartPio, &uart_rx_program, false /* Rx */)) {
+        bprintf("pico serialUART_pio rx failed to add program to pio");
+        return false;
+    }
+
+    const int pio_sm_rx = pio_claim_unused_sm(uartPio, false);
+    if (pio_sm_rx < 0) {
+        bprintf("pico serialUART_pio rx failed to claim state machine");
+        return false;
+    }
+
+    uartPioDetailsPtr->sm_rx = pio_sm_rx;
+    uartPioDetailsPtr->rx_intr_bit = rxnemptybit[pio_sm_rx];
+    uartPioDetailsPtr->useRx = true;
+    return true;
+}
+
+bool serialUART_pio(uartPort_t *s, uint32_t baudRate, portMode_e mode, portOptions_e options,
+                    const pioUartHardware_t *hardware, serialPortIdentifier_e identifier, IO_t txIO, IO_t rxIO)
+{
+    // Set up details for state machine, will be finalised in uartReconfigure.
+    if ((options & SERIAL_PARITY_EVEN) != 0) {
+        bprintf("*** option SERIAL_PARITY_EVEN not yet supported for UART PIO ***");
+        return false;
+    }
+
+    // mode and baudrate are captured on the uartPort in uartOpen, and are addressed in uartReconfigure
+    UNUSED(baudRate);
+
+    // For half duplex, both SMs get set up on the same pin (tx), and the tx program deals with direction
+    // (tx program returns pin to input once tx fifo empty).
+    // Everything transmitted is echoed to the rx, and the echo is deliberately passed up
+    // rather than filtered, same as on other platforms (and expected by drivers, e.g. iBus telemetry).
+    const bool halfDuplex = (options & SERIAL_BIDIR) && txIO;
+
+    const int ownerIndex = serialOwnerIndex(identifier);
+    const resourceOwner_e ownerTxRx = serialOwnerTxRx(identifier); // rx is always +1
+    pioDetails_t *uartPioDetailsPtr = UART_PIO_DETAILS_PTR(identifier);
+    uartPioDetailsPtr->irqn = hardware->irqn;
+    uartPioDetailsPtr->enableReg = PIO_IRQ_INDEX(hardware->irqn) == 0 ? &(uartPio->inte0) : &(uartPio->inte1);
+    uartPioDetailsPtr->statusReg = PIO_IRQ_INDEX(hardware->irqn) == 0 ? &(uartPio->ints0) : &(uartPio->ints1);
+    uartPioDetailsPtr->halfDuplex = halfDuplex;
+    uartPioDetailsPtr->useTx = false;
+    uartPioDetailsPtr->useRx = false;
+
+    uartPioDetailsPtr->txPin = txIO ? (int)IO_Pin(txIO) : -1;
+    // In half duplex, listen on the tx pin.
+    const IO_t rxActualIO = halfDuplex ? txIO : rxIO;
+    uartPioDetailsPtr->rxPin = rxActualIO ? (int)IO_Pin(rxActualIO) : -1;
+
+    if (txIO) {
+        IOInit(txIO, ownerTxRx, ownerIndex);
+        bprintf("set up PIO for UART on tx pin %d", uartPioDetailsPtr->txPin);
+    }
+    if (rxActualIO && !halfDuplex) {
+        IOInit(rxActualIO, ownerTxRx + 1, ownerIndex);
+    }
+
+    // Half duplex needs the tx state machine to hand the pin back to rx. A mode without either
+    // direction keeps the old behaviour of claiming whatever pins the port has.
+    const bool wantTx = txIO && ((mode & MODE_TX) || halfDuplex || !(mode & MODE_RX));
+    const bool wantRx = rxActualIO && ((mode & MODE_RX) || !(mode & MODE_TX));
+
+    if (wantTx && !claimTxStateMachine(s, uartPioDetailsPtr)) {
+        return false;
+    }
+
+    if (wantRx) {
+        bprintf("set up PIO for UART on rx pin %d%s", uartPioDetailsPtr->rxPin, halfDuplex ? " (half duplex, shared with tx)" : "");
+        if (!claimRxStateMachine(uartPioDetailsPtr)) {
+            return false;
+        }
+    }
+
+    // TODO implement - use options here...
+//    uart_set_hw_flow(uartInstance, false, false);
+//    uart_set_format(uartInstance, 8, 1, UART_PARITY_NONE);
+
+    bprintf("id %d, going to set exclusive handler for irqn %d", hardware->identifier, hardware->irqn);
+    irq_set_exclusive_handler(hardware->irqn, hardware->identifier == SERIAL_PORT_PIOUART0 ? on_pioUART0 : on_pioUART1);
+    irq_set_enabled(hardware->irqn, true);
+
+    // Don't enable pio irq yet, wait until a call to uartReconfigure...
+    // (with current code in serial_uart.c, this prevents irq callback before rxCallback has been set)
+
+    s->port.rxBuffer = hardware->rxBuffer;
+    s->port.txBuffer = hardware->txBuffer;
+    bprintf("uartport %p port %p txbuffer %p from hardware %p",
+            s, &s->port, s->port.txBuffer, hardware);
+    s->port.rxBufferSize = hardware->rxBufferSize;
+    s->port.txBufferSize = hardware->txBufferSize;
+    return true;
+}
+
+void uartReconfigure_pio(uartPort_t *s)
+{
+    const serialPortIdentifier_e identifier = s->port.identifier;
+    pioDetails_t *uartPioDetailsPtr = UART_PIO_DETAILS_PTR(identifier);
+    const portOptions_e options = s->port.options;
+    const bool halfDuplex = uartPioDetailsPtr->halfDuplex;
+
+    // serialSetMode() may have added a direction this port has no state machine for yet. If none is
+    // free, drop that direction from the mode so it reflects what the port can do.
+    if ((s->port.mode & MODE_TX) && !uartPioDetailsPtr->useTx
+        && (uartPioDetailsPtr->txPin < 0 || !claimTxStateMachine(s, uartPioDetailsPtr))) {
+        s->port.mode &= ~MODE_TX;
+    }
+    if ((s->port.mode & MODE_RX) && !uartPioDetailsPtr->useRx
+        && (uartPioDetailsPtr->rxPin < 0 || !claimRxStateMachine(uartPioDetailsPtr))) {
+        s->port.mode &= ~MODE_RX;
+    }
+
+    uint sm_tx = uartPioDetailsPtr->sm_tx;
+    uint sm_rx = uartPioDetailsPtr->sm_rx;
+    pio_interrupt_source_t irqSourceRX = pio_get_rx_fifo_not_empty_interrupt_source(sm_rx);
+    pio_interrupt_source_t irqSourceTX = pio_get_tx_fifo_not_full_interrupt_source(sm_tx);
+    int irqn_index = PIO_IRQ_INDEX(uartPioDetailsPtr->irqn);
+
+    if (uartPioDetailsPtr->useRx) {
+        pio_set_irqn_source_enabled(uartPio, irqn_index, irqSourceRX, false);
+    }
+
+    if (uartPioDetailsPtr->useTx) {
+        pio_set_irqn_source_enabled(uartPio, irqn_index, irqSourceTX, false);
+    }
+
+    // (re)init program, with baud rate
+    // Arrange GPIO including pull for RX, assign PIO SM pins, FIFO, clock, enable SM
+#if defined(PICO_TRACE_UART_EXTRA) && defined(PICO_TRACE)
+    bprintf("uartReconfigure for port %p with PIO %p, mode = 0x%x", s, uartPio, s->port.mode);
+    bprintf("uartReconfigure_pio init rx, tx programs, pins %d, %d, (requested) baudrate %d",
+            uartPioDetailsPtr->rxPin, uartPioDetailsPtr->txPin, s->port.baudRate);
+#endif
+
+    if (uartPioDetailsPtr->useRx) {
+        uart_rx_program_init(uartPio, sm_rx, rxProgram_offset, uartPioDetailsPtr->rxPin, s->port.baudRate,
+                             serialOptions_pull(options));
+    }
+
+    if (uartPioDetailsPtr->useTx) {
+        uart_tx_program_init(uartPio, sm_tx, txProgram_offset, uartPioDetailsPtr->txPin, s->port.baudRate,
+                             halfDuplex, (options & SERIAL_STOPBITS_2) != 0);
+    }
+
+    // The program inits select the pin function, which clears the GPIO inversion
+    // overrides, so they have to be reapplied here.
+    uartApplyGpioInversion(s, s->port.options);
+
+    uartConfigureExternalPinInversion(s);
+
+    // Start receiving if MODE_RX
+    if (uartPioDetailsPtr->useRx) {
+        pio_set_irqn_source_enabled(uartPio, irqn_index, irqSourceRX, s->port.mode & MODE_RX);
+    }
+}
+
+void uartEnableTxInterrupt_pio(uartPort_t *uartPort)
+{
+    pioDetails_t *pioDetailsPtr = UART_PIO_DETAILS_PTR(uartPort->port.identifier);
+    if (!pioDetailsPtr->useTx) {
+        return;
+    }
+
+    pio_interrupt_source_t irqSourceTX = pio_get_tx_fifo_not_full_interrupt_source(pioDetailsPtr->sm_tx);
+    int irqn_index = PIO_IRQ_INDEX(pioDetailsPtr->irqn);
+    // bprintf("uartEnableTxInterrupt_pio %p irqn_index %d, %p", uartPio, irqn_index, irqSourceTX);
+    pio_set_irqn_source_enabled(uartPio, irqn_index, irqSourceTX, true);
+}
+
+#else
+
+void uartPinConfigure_pio(const serialPinConfig_t *pSerialPinConfig)
+{
+    UNUSED(pSerialPinConfig);
+}
+
+bool serialUART_pio(uartPort_t *s, uint32_t baudRate, portMode_e mode, portOptions_e options,
+                    const pioUartHardware_t *hardware, serialPortIdentifier_e identifier, IO_t txIO, IO_t rxIO)
+{
+    UNUSED(s);
+    UNUSED(baudRate);
+    UNUSED(mode);
+    UNUSED(options);
+    UNUSED(hardware);
+    UNUSED(identifier);
+    UNUSED(txIO);
+    UNUSED(rxIO);
+    return false;
+}
+
+void uartReconfigure_pio(uartPort_t *s)
+{
+    UNUSED(s);
+}
+
+void uartEnableTxInterrupt_pio(uartPort_t *uartPort)
+{
+    UNUSED(uartPort);
+}
+
+#endif // #if SERIAL_PIOUART_COUNT > 0

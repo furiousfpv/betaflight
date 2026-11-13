@@ -1,0 +1,867 @@
+/*
+ * This file is part of Cleanflight and Betaflight.
+ *
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
+ *
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
+ *
+ * You should have received a copy of the GNU General Public License
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
+ */
+
+#pragma once
+
+#include <stdbool.h>
+#include <stdint.h>
+
+#if defined(STM32G474xx)
+#include "stm32g4xx.h"
+#include "stm32g4xx_hal.h"
+#include "system_stm32g4xx.h"
+
+#include "stm32g4xx_ll_spi.h"
+#include "stm32g4xx_ll_usart.h"
+#include "stm32g4xx_ll_gpio.h"
+#include "stm32g4xx_ll_dma.h"
+#include "stm32g4xx_ll_rcc.h"
+#include "stm32g4xx_ll_bus.h"
+#include "stm32g4xx_ll_tim.h"
+#include "stm32g4xx_ll_i2c.h"
+#include "stm32g4xx_ll_system.h"
+#include "stm32g4xx_ll_ex.h"
+
+// Chip Unique ID on G4
+#define U_ID_0 (*(uint32_t*)UID_BASE)
+#define U_ID_1 (*(uint32_t*)(UID_BASE + 4))
+#define U_ID_2 (*(uint32_t*)(UID_BASE + 8))
+
+#define SPI_TRAIT_AF_PIN 1
+#define I2C_TRAIT_AF_PIN 1
+
+#ifndef STM32G4
+#define STM32G4
+#endif
+
+#elif defined(STM32H743xx) || defined(STM32H750xx) || defined(STM32H7A3xx) || defined(STM32H7A3xxQ) || defined(STM32H723xx) || defined(STM32H725xx) || defined(STM32H730xx) || defined(STM32H735xx) || defined(STM32H753xx) || defined(STM32H757xx)
+#include "stm32h7xx.h"
+#include "stm32h7xx_hal.h"
+#include "system_stm32h7xx.h"
+
+#include "stm32h7xx_ll_spi.h"
+#include "stm32h7xx_ll_usart.h"
+#include "stm32h7xx_ll_gpio.h"
+#include "stm32h7xx_ll_bdma.h"
+#include "stm32h7xx_ll_dma.h"
+#include "stm32h7xx_ll_rcc.h"
+#include "stm32h7xx_ll_bus.h"
+#include "stm32h7xx_ll_tim.h"
+#include "stm32h7xx_ll_i2c.h"
+#include "stm32h7xx_ll_system.h"
+#include "stm32h7xx_ll_ex.h"
+
+// Chip Unique ID on H7
+// M4 core cannot access system memory where UID is stored
+#ifndef CORE_CM4
+#define U_ID_0 (*(uint32_t*)UID_BASE)
+#define U_ID_1 (*(uint32_t*)(UID_BASE + 4))
+#define U_ID_2 (*(uint32_t*)(UID_BASE + 8))
+#else
+#define U_ID_0 0
+#define U_ID_1 0
+#define U_ID_2 0
+#endif
+
+#define SPI_TRAIT_AF_PIN 1
+#define I2C_TRAIT_AF_PIN 1
+
+#ifndef STM32H7
+#define STM32H7
+#endif
+
+// M4 core on dual-core H7 (H745/H747/H755/H757) has no cache
+#if defined(CORE_CM4)
+#define SCB_EnableICache()      ((void)0)
+#define SCB_DisableICache()     ((void)0)
+#define SCB_EnableDCache()      ((void)0)
+#define SCB_DisableDCache()     ((void)0)
+#define SCB_InvalidateDCache_by_Addr(addr, size)  ((void)0)
+#define SCB_CleanDCache_by_Addr(addr, size)       ((void)0)
+// Map single-core reset flag to M4's reset flag for dual-core
+#define RCC_RSR_SFTRSTF         RCC_RSR_SFT2RSTF
+#endif
+
+// On dual-core H7 (H745/H747/H755/H757), the single-core RCC_RSR_SFTRSTF
+// symbol does not exist; M7's reset flag is RCC_RSR_SFT1RSTF. Map it here so
+// shared code that checks the soft-reset flag works on the M7 side too.
+#if defined(CORE_CM7) && defined(STM32H757xx)
+#define RCC_RSR_SFTRSTF         RCC_RSR_SFT1RSTF
+#endif
+
+#elif defined(STM32H563xx) || defined(STM32H562xx)
+#include "stm32h5xx.h"
+#include "stm32h5xx_hal.h"
+#include "system_stm32h5xx.h"
+
+#include "stm32h5xx_ll_spi.h"
+#include "stm32h5xx_ll_usart.h"
+#include "stm32h5xx_ll_gpio.h"
+#include "stm32h5xx_ll_dma.h"
+#include "stm32h5xx_ll_rcc.h"
+#include "stm32h5xx_ll_bus.h"
+#include "stm32h5xx_ll_i2c.h"
+#include "stm32h5xx_ll_tim.h"
+#include "stm32h5xx_ll_system.h"
+#include "stm32h5xx_ll_ex.h"
+
+// Chip Unique ID on H5
+#define U_ID_0 (*(uint32_t*)UID_BASE)
+#define U_ID_1 (*(uint32_t*)(UID_BASE + 4))
+#define U_ID_2 (*(uint32_t*)(UID_BASE + 8))
+
+#define SPI_TRAIT_AF_PIN 1
+#define I2C_TRAIT_AF_PIN 1
+
+#ifndef STM32H5
+#define STM32H5
+#endif
+
+#elif defined(STM32F722xx) || defined(STM32F745xx) || defined(STM32F746xx) || defined(STM32F765xx)
+#include "stm32f7xx.h"
+#include "stm32f7xx_hal.h"
+#include "system_stm32f7xx.h"
+
+#include "stm32f7xx_ll_spi.h"
+#include "stm32f7xx_ll_usart.h"
+#include "stm32f7xx_ll_gpio.h"
+#include "stm32f7xx_ll_dma.h"
+#include "stm32f7xx_ll_rcc.h"
+#include "stm32f7xx_ll_bus.h"
+#include "stm32f7xx_ll_tim.h"
+#include "stm32f7xx_ll_i2c.h"
+#include "stm32f7xx_ll_system.h"
+#include "stm32f7xx_ll_ex.h"
+
+// Chip Unique ID on F7
+#define U_ID_0 (*(uint32_t*)UID_BASE)
+#define U_ID_1 (*(uint32_t*)(UID_BASE + 4))
+#define U_ID_2 (*(uint32_t*)(UID_BASE + 8))
+
+#define SPI_TRAIT_AF_PIN 1
+
+#ifndef STM32F7
+#define STM32F7
+#endif
+
+#elif defined(STM32F40_41xxx) || defined(STM32F411xE) || defined(STM32F446xx)
+
+#include "stm32f4xx.h"
+
+// Chip Unique ID on F405
+#define U_ID_0 (*(uint32_t*)0x1fff7a10)
+#define U_ID_1 (*(uint32_t*)0x1fff7a14)
+#define U_ID_2 (*(uint32_t*)0x1fff7a18)
+
+#define SPI_TRAIT_AF_PORT 1
+
+#define I2C_TRAIT_STATE 1
+#define I2C_TRAIT_AF_PIN 1
+
+#define GPIO_PIN_RESET 0
+
+#ifndef STM32F4
+#define STM32F4
+#endif
+
+#elif defined(STM32C591xx) || defined(STM32C5A3xx) || defined(STM32C562xx)
+#include "stm32c5xx.h"
+#include "stm32c5xx_hal.h"
+// HAL2: module headers must be included explicitly (hal_conf.h only defines enables)
+#include "stm32c5xx_hal_rcc.h"
+#include "stm32c5xx_hal_gpio.h"
+#include "stm32c5xx_hal_dma.h"
+#include "stm32c5xx_hal_cortex.h"
+#include "stm32c5xx_hal_flash.h"
+#include "stm32c5xx_hal_pwr.h"
+#include "stm32c5xx_hal_tim.h"
+#include "stm32c5xx_hal_tamp.h"
+#include "system_stm32c5xx.h"
+
+#include "stm32c5xx_ll_spi.h"
+#include "stm32c5xx_ll_usart.h"
+#include "stm32c5xx_ll_gpio.h"
+#include "stm32c5xx_ll_dma.h"
+#include "stm32c5xx_ll_rcc.h"
+#include "stm32c5xx_ll_bus.h"
+#include "stm32c5xx_ll_tim.h"
+#include "stm32c5xx_ll_i2c.h"
+#include "stm32c5xx_ll_system.h"
+
+// HAL2 compat must come AFTER all HAL/LL headers (needs their types)
+#include "stm32c5xx_hal2_compat.h"
+#include "stm32c5xx_ll_ex.h"
+
+// Chip Unique ID on C5
+#define U_ID_0 (*(uint32_t*)UID_BASE)
+#define U_ID_1 (*(uint32_t*)(UID_BASE + 4))
+#define U_ID_2 (*(uint32_t*)(UID_BASE + 8))
+
+#define USE_PIN_AF
+
+#define SPI_TRAIT_AF_PIN 1
+#define I2C_TRAIT_AF_PIN 1
+
+#ifndef STM32C5
+#define STM32C5
+#endif
+
+#elif defined(STM32N657xx)
+#include "stm32n6xx.h"
+#include "partition_stm32n6xx.h"
+#include "stm32n6xx_hal.h"
+#include "system_stm32n6xx.h"
+
+#include "stm32n6xx_ll_spi.h"
+#include "stm32n6xx_ll_usart.h"
+#include "stm32n6xx_ll_gpio.h"
+#include "stm32n6xx_ll_dma.h"
+#include "stm32n6xx_ll_rcc.h"
+#include "stm32n6xx_ll_bus.h"
+#include "stm32n6xx_ll_tim.h"
+#include "stm32n6xx_ll_i2c.h"
+#include "stm32n6xx_ll_system.h"
+#include "stm32n6xx_ll_ex.h"
+
+// Chip Unique ID on N6
+#define U_ID_0 (*(uint32_t*)UID_BASE)
+#define U_ID_1 (*(uint32_t*)(UID_BASE + 4))
+#define U_ID_2 (*(uint32_t*)(UID_BASE + 8))
+
+#define USE_PIN_AF
+
+#define SPI_TRAIT_AF_PIN 1
+#define I2C_TRAIT_AF_PIN 1
+
+#ifndef STM32N6
+#define STM32N6
+#endif
+
+// N6 boots from external XSPI flash in memory-mapped mode
+#if !defined(USE_FLASH_MEMORY_MAPPED) && !defined(CONFIG_IN_RAM) && !defined(CONFIG_IN_SDCARD)
+#define USE_FLASH_MEMORY_MAPPED
+#endif
+
+#endif // MCU family selection
+
+#ifdef STM32F4
+#if defined(STM32F40_41xxx)
+#define USE_FAST_DATA
+#endif
+
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+#define USE_ADC_INTERNAL
+#define USE_USB_CDC_HID
+#define USE_USB_MSC
+#define USE_PERSISTENT_MSC_RTC
+#define USE_MCO
+#define USE_MCO_DEVICE2
+#define USE_DMA_SPEC
+#define USE_PERSISTENT_OBJECTS
+#define USE_LATE_TASK_STATISTICS
+
+#if defined(STM32F40_41xxx)
+#define USE_OVERCLOCK
+#define ENABLE_OVERCLOCK_192_MHZ 1
+#define ENABLE_OVERCLOCK_216_MHZ 1
+#define ENABLE_OVERCLOCK_240_MHZ 1
+#elif defined(STM32F411xE)
+#define USE_OVERCLOCK
+#define ENABLE_OVERCLOCK_108_MHZ 1
+#define ENABLE_OVERCLOCK_120_MHZ 1
+#endif
+#endif // STM32F4
+
+#ifdef STM32F7
+#define USE_ITCM_RAM
+#define ITCM_RAM_OPTIMISATION "-O2", "-freorder-blocks-algorithm=simple"
+#define USE_FAST_DATA
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+#define USE_OVERCLOCK
+#define ENABLE_OVERCLOCK_240_MHZ 1
+#define USE_ADC_INTERNAL
+#define USE_USB_CDC_HID
+#define USE_USB_MSC
+#define USE_PERSISTENT_MSC_RTC
+#define USE_MCO
+#define USE_MCO_DEVICE2
+#define USE_DMA_SPEC
+#define USE_PERSISTENT_OBJECTS
+#define USE_LATE_TASK_STATISTICS
+// SERIAL_CHECK_TX is broken on F7, skip it unless USE_F7_CHECK_TX is defined
+#if !defined(USE_F7_CHECK_TX)
+#define ENABLE_SERIAL_SKIP_CHECK_TX 1
+#endif
+#endif // STM32F7
+
+#ifdef STM32H7
+
+// M4 core (dual-core H7) has no cache or ITCM
+#if defined(USE_DSHOT) && !defined(CORE_CM4)
+#define USE_DSHOT_CACHE_MGMT
+#endif
+
+#ifndef CORE_CM4
+#define USE_ITCM_RAM
+#endif
+#define USE_FAST_DATA
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+#ifndef CORE_CM4
+#define USE_ADC_INTERNAL
+#endif
+#define USE_USB_CDC_HID
+#define USE_DMA_SPEC
+#define USE_PERSISTENT_OBJECTS
+#define USE_DMA_RAM
+#if !defined(ENABLE_AFATFS_DMA_CACHE)
+#define ENABLE_AFATFS_DMA_CACHE 1
+#endif
+#define USE_USB_MSC
+#define USE_RTC_TIME
+#define USE_PERSISTENT_MSC_RTC
+#define USE_LATE_TASK_STATISTICS
+#if !defined(ENABLE_CAN)
+#define ENABLE_CAN 1
+#endif
+#endif
+
+#ifdef STM32G4
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_OVERCLOCK
+#define ENABLE_OVERCLOCK_192_MHZ 1
+#define ENABLE_OVERCLOCK_216_MHZ 1
+#define ENABLE_OVERCLOCK_240_MHZ 1
+#define USE_DYN_NOTCH_FILTER
+#define USE_ADC_INTERNAL
+#define USE_USB_MSC
+#define USE_USB_CDC_HID
+#define USE_MCO
+#define USE_MCO_DEVICE1
+#define USE_DMA_SPEC
+#define USE_LATE_TASK_STATISTICS
+#if !defined(ENABLE_CAN)
+#define ENABLE_CAN 1
+#endif
+#endif
+
+#ifdef STM32H5
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+#define USE_ADC_INTERNAL
+#define USE_DMA_SPEC
+#define USE_PERSISTENT_OBJECTS
+#define USE_LATE_TASK_STATISTICS
+#endif
+
+#ifdef STM32C5
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+#define USE_ADC_INTERNAL
+#define USE_DMA_SPEC
+#define USE_PERSISTENT_OBJECTS
+#define USE_LATE_TASK_STATISTICS
+#define USE_USB_MSC
+// Not every C5 carries FDCAN: C591 has none, while C562 has a single FDCAN1
+// and C593 and C5A3 have FDCAN1 + FDCAN2. Enable CAN only on the variants that
+// have it.
+#if (defined(STM32C562xx) || defined(STM32C593xx) || defined(STM32C5A3xx)) \
+    && !defined(ENABLE_CAN)
+#define ENABLE_CAN 1
+#endif
+// C591 has no FDCAN at all (DS15136: "FDCAN 0 (on STM32C591xx)"), so the
+// hardware table would fall through to the C593 mapping and hand it register
+// addresses and IRQs that do not exist on the part. Nothing in tree sets this,
+// but a -DENABLE_CAN=1 on the command line would reach it, so fail the build
+// rather than the flight.
+#if defined(STM32C591xx) && ENABLE_CAN
+#error "STM32C591 has no FDCAN peripheral; ENABLE_CAN cannot be set for it"
+#endif
+#endif
+
+#ifdef STM32N6
+#define USE_RPM_FILTER
+#define USE_DYN_IDLE
+#define USE_DYN_NOTCH_FILTER
+// N6 lacks factory calibration data for VREFINT/TEMPSENSOR; disable internal ADC for now
+//#define USE_ADC_INTERNAL
+#define USE_DMA_SPEC
+#define USE_PERSISTENT_OBJECTS
+#define USE_DMA_RAM
+#define USE_RTC_TIME
+#define USE_LATE_TASK_STATISTICS
+#ifdef USE_DSHOT
+/* AXISRAM is cacheable; DMA reads bypass the M55 D-cache so the DShot
+ * output/input buffers must be cleaned/invalidated each frame. */
+#define USE_DSHOT_CACHE_MGMT
+#endif
+#endif
+
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+#define TASK_GYROPID_DESIRED_PERIOD     125 // 125us = 8kHz
+#define SCHEDULER_DELAY_LIMIT           10
+#else
+#define TASK_GYROPID_DESIRED_PERIOD     1000 // 1000us = 1kHz
+#define SCHEDULER_DELAY_LIMIT           100
+#endif
+
+// Allow RX and OSD tasks to be scheduled at the second attempt on F411 processors
+#if defined(STM32F411xE)
+#define SCHEDULER_RELAX_RX  1
+#define SCHEDULER_RELAX_OSD 1
+#endif
+
+// Set the default cpu_overclock to the first level (108MHz) for F411
+// Helps with looptime stability as the CPU is borderline when running native gyro sampling
+#if defined(USE_OVERCLOCK) && defined(STM32F411xE)
+#define DEFAULT_CPU_OVERCLOCK 1
+#else
+#define DEFAULT_CPU_OVERCLOCK 0
+#endif
+
+#if defined(STM32H7) || defined(STM32N6)
+// Move ISRs to fast ram to avoid flash latency.
+#define FAST_IRQ_HANDLER FAST_CODE
+#else
+#define FAST_IRQ_HANDLER
+#endif
+
+#if defined(STM32F4) || defined(STM32G4)
+// F4 can't DMA to/from CCM (core coupled memory) SRAM (where the stack lives)
+// On G4 there is no specific DMA target memory
+#define DMA_DATA_ZERO_INIT
+#define DMA_DATA
+#define STATIC_DMA_DATA_AUTO        static
+#elif defined(STM32F7)
+// F7 has no cache coherency issues DMAing to/from DTCM, otherwise buffers must be cache aligned
+#define DMA_DATA_ZERO_INIT          FAST_DATA_ZERO_INIT
+#define DMA_DATA                    FAST_DATA
+#define STATIC_DMA_DATA_AUTO        static DMA_DATA
+#else
+// DMA to/from any memory
+#define DMA_DATA_ZERO_INIT          __attribute__ ((section(".dmaram_bss"), aligned(32)))
+#define DMA_DATA                    __attribute__ ((section(".dmaram_data"), aligned(32)))
+#define STATIC_DMA_DATA_AUTO        static DMA_DATA
+#endif
+
+#if defined(STM32F4) || defined(STM32H7) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+// Data in RAM which is guaranteed to not be reset on hot reboot
+#define PERSISTENT                  __attribute__ ((section(".persistent_data"), aligned(4)))
+#endif
+
+#ifdef USE_DMA_RAM
+#if defined(STM32H7)
+#define DMA_RAM __attribute__((section(".DMA_RAM"), aligned(32)))
+#define DMA_RW_AXI __attribute__((section(".DMA_RW_AXI"), aligned(32)))
+// D3 SRAM4, reachable by BDMA. NOLOAD like DMA_RAM: not zeroed or initialised at startup
+#define BDMA_RAM __attribute__((section(".BDMA_RAM"), aligned(4)))
+extern uint8_t _dmaram_start__;
+extern uint8_t _dmaram_end__;
+
+/* The part of the above the MPU is actually leaving out of the D cache, resolved at boot
+ * by memProtResolveDmaRam(). This answers only whether a transfer needs cache maintenance
+ * to stay coherent - the linker symbols still answer where a buffer was placed, and so
+ * whether DMA can reach it at all.
+ *
+ * Held in DTCM as a base and a length, both loads coming from zero wait state memory.
+ * Zero until resolved, which reads as "cached", so a transfer before then gets the full
+ * maintenance rather than none.
+ *
+ * The whole buffer has to be inside the span, not just its first byte: the span can end
+ * part way through the dmaram sections, and a buffer straddling that edge would otherwise
+ * have its cached tail go unmaintained.
+ */
+extern uint32_t dmaramUncachedBase;
+extern uint32_t dmaramUncachedLength;
+
+static inline bool isDmaramUncached(const void *addr, uint32_t len)
+{
+    const uint32_t offset = (uint32_t)addr - dmaramUncachedBase;
+
+    // The second test cannot underflow: the first has established offset < length
+    return (offset < dmaramUncachedLength) && (len <= dmaramUncachedLength - offset);
+}
+#elif defined(STM32N6)
+#define DMA_RAM __attribute__((section(".DMA_RAM"), aligned(32)))
+#define DMA_RW_AXI __attribute__((section(".DMA_RW_AXI"), aligned(32)))
+extern uint8_t _dmaram_start__;
+extern uint8_t _dmaram_end__;
+#elif defined(STM32G4)
+#define DMA_RAM_R __attribute__((section(".DMA_RAM_R")))
+#define DMA_RAM_W __attribute__((section(".DMA_RAM_W")))
+#define DMA_RAM_RW __attribute__((section(".DMA_RAM_RW")))
+#endif
+#else
+#define DMA_RAM
+#define DMA_RW_AXI
+#define BDMA_RAM
+#define DMA_RAM_R
+#define DMA_RAM_W
+#define DMA_RAM_RW
+#endif
+
+#define USE_TIMER_MGMT
+#define USE_TIMER_AF
+
+// Camera control PWM availability per STM32 family
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5)
+#define CAMERA_CONTROL_HARDWARE_PWM_AVAILABLE
+#endif
+
+#if defined(STM32F405)
+#define CAMERA_CONTROL_SOFTWARE_PWM_AVAILABLE
+#endif
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32N6) || defined(STM32C5)
+
+// speed is packed between modebits 4 and 1,
+// 7       6        5        4         3         2        1        0
+// 0 <pupd-1> <pupd-0> <mode-4> <speed-1> <speed-0> <mode-1> <mode-0>
+// mode-4 is equivalent to STM32F4 otype (pushpull/od)
+#define IO_CONFIG(mode, speed, pupd) ((mode) | ((speed) << 2) | ((pupd) << 5))
+
+#define IOCFG_OUT_PP         IO_CONFIG(GPIO_MODE_OUTPUT_PP, GPIO_SPEED_FREQ_LOW,  GPIO_NOPULL)
+#define IOCFG_OUT_PP_UP      IO_CONFIG(GPIO_MODE_OUTPUT_PP, GPIO_SPEED_FREQ_LOW,  GPIO_PULLUP)
+#define IOCFG_OUT_PP_25      IO_CONFIG(GPIO_MODE_OUTPUT_PP, GPIO_SPEED_FREQ_HIGH, GPIO_NOPULL)
+#define IOCFG_OUT_OD         IO_CONFIG(GPIO_MODE_OUTPUT_OD, GPIO_SPEED_FREQ_LOW,  GPIO_NOPULL)
+#define IOCFG_AF_PP          IO_CONFIG(GPIO_MODE_AF_PP,     GPIO_SPEED_FREQ_LOW,  GPIO_NOPULL)
+#define IOCFG_AF_PP_PD       IO_CONFIG(GPIO_MODE_AF_PP,     GPIO_SPEED_FREQ_LOW,  GPIO_PULLDOWN)
+#define IOCFG_AF_PP_UP       IO_CONFIG(GPIO_MODE_AF_PP,     GPIO_SPEED_FREQ_LOW,  GPIO_PULLUP)
+#define IOCFG_AF_OD          IO_CONFIG(GPIO_MODE_AF_OD,     GPIO_SPEED_FREQ_LOW,  GPIO_NOPULL)
+#define IOCFG_IPD            IO_CONFIG(GPIO_MODE_INPUT,     GPIO_SPEED_FREQ_LOW,  GPIO_PULLDOWN)
+#define IOCFG_IPU            IO_CONFIG(GPIO_MODE_INPUT,     GPIO_SPEED_FREQ_LOW,  GPIO_PULLUP)
+#define IOCFG_IN_FLOATING    IO_CONFIG(GPIO_MODE_INPUT,     GPIO_SPEED_FREQ_LOW,  GPIO_NOPULL)
+#define IOCFG_IPU_25         IO_CONFIG(GPIO_MODE_INPUT,     GPIO_SPEED_FREQ_HIGH, GPIO_PULLUP)
+
+#elif defined(STM32F4)
+
+#define IO_CONFIG(mode, speed, otype, pupd) ((mode) | ((speed) << 2) | ((otype) << 4) | ((pupd) << 5))
+
+#define IOCFG_OUT_PP         IO_CONFIG(GPIO_Mode_OUT, 0, GPIO_OType_PP, GPIO_PuPd_NOPULL)  // TODO
+#define IOCFG_OUT_PP_UP      IO_CONFIG(GPIO_Mode_OUT, 0, GPIO_OType_PP, GPIO_PuPd_UP)
+#define IOCFG_OUT_PP_25      IO_CONFIG(GPIO_Mode_OUT, GPIO_Speed_25MHz, GPIO_OType_PP, GPIO_PuPd_NOPULL)
+#define IOCFG_OUT_OD         IO_CONFIG(GPIO_Mode_OUT, 0, GPIO_OType_OD, GPIO_PuPd_NOPULL)
+#define IOCFG_AF_PP          IO_CONFIG(GPIO_Mode_AF,  0, GPIO_OType_PP, GPIO_PuPd_NOPULL)
+#define IOCFG_AF_PP_PD       IO_CONFIG(GPIO_Mode_AF,  0, GPIO_OType_PP, GPIO_PuPd_DOWN)
+#define IOCFG_AF_PP_UP       IO_CONFIG(GPIO_Mode_AF,  0, GPIO_OType_PP, GPIO_PuPd_UP)
+#define IOCFG_AF_OD          IO_CONFIG(GPIO_Mode_AF,  0, GPIO_OType_OD, GPIO_PuPd_NOPULL)
+#define IOCFG_IPD            IO_CONFIG(GPIO_Mode_IN,  0, 0,             GPIO_PuPd_DOWN)
+#define IOCFG_IPU            IO_CONFIG(GPIO_Mode_IN,  0, 0,             GPIO_PuPd_UP)
+#define IOCFG_IN_FLOATING    IO_CONFIG(GPIO_Mode_IN,  0, 0,             GPIO_PuPd_NOPULL)
+#define IOCFG_IPU_25         IO_CONFIG(GPIO_Mode_IN,  GPIO_Speed_25MHz, 0, GPIO_PuPd_UP)
+
+#endif
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32N6) || defined(STM32C5)
+
+#define IO_CONFIG_GET_MODE(cfg)  (((cfg) >> 0) & 0x03)
+#define IO_CONFIG_GET_SPEED(cfg) (((cfg) >> 2) & 0x03)
+#define IO_CONFIG_GET_OTYPE(cfg) (((cfg) >> 4) & 0x01)
+#define IO_CONFIG_GET_PULL(cfg)  (((cfg) >> 5) & 0x03)
+
+#endif
+
+#if defined(STM32H743xx) || defined(STM32H750xx) || defined(STM32H723xx) || defined(STM32H725xx) || defined(STM32H735xx) || defined(STM32H753xx) || defined(STM32H757xx)
+#define FLASH_CONFIG_STREAMER_BUFFER_SIZE 32  // Flash word = 256-bits (8 rows, uint32_t per row - 8 x 32)
+#define FLASH_CONFIG_BUFFER_TYPE uint32_t
+#elif defined(STM32H7A3xx) || defined(STM32H7A3xxQ) || defined(STM32H5) || defined(STM32C5)
+#define FLASH_CONFIG_STREAMER_BUFFER_SIZE 16  // Flash word = 128-bits (4 rows, uint32_t per row - 4 x 32)
+#define FLASH_CONFIG_BUFFER_TYPE uint32_t
+#elif defined(STM32G4)
+#define FLASH_CONFIG_BUFFER_TYPE uint64_t
+#else
+#define FLASH_CONFIG_BUFFER_TYPE uint32_t
+#endif
+
+#if defined(STM32F4)
+#define SPI_IO_AF_CFG           IO_CONFIG(GPIO_Mode_AF,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_NOPULL)
+#define SPI_IO_AF_SCK_CFG       IO_CONFIG(GPIO_Mode_AF,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_DOWN)
+#define SPI_IO_AF_SDI_CFG       IO_CONFIG(GPIO_Mode_AF,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_UP)
+#define SPI_IO_CS_CFG           IO_CONFIG(GPIO_Mode_OUT, GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_NOPULL)
+#define SPI_IO_CS_HIGH_CFG      IO_CONFIG(GPIO_Mode_IN,  GPIO_Speed_50MHz, GPIO_OType_PP, GPIO_PuPd_UP)
+#elif defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+#define SPI_IO_AF_CFG           IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_NOPULL)
+#define SPI_IO_AF_SCK_CFG_HIGH  IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLUP)
+#define SPI_IO_AF_SCK_CFG_LOW   IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLDOWN)
+#define SPI_IO_AF_SDI_CFG       IO_CONFIG(GPIO_MODE_AF_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLUP)
+#define SPI_IO_CS_CFG           IO_CONFIG(GPIO_MODE_OUTPUT_PP, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_NOPULL)
+#define SPI_IO_CS_HIGH_CFG      IO_CONFIG(GPIO_MODE_INPUT, GPIO_SPEED_FREQ_VERY_HIGH, GPIO_PULLUP)
+#else
+#error "Invalid STM MCU defined - requires SPI implementation"
+#endif
+
+#if defined(STM32F4)
+#define SPIDEV_COUNT 3
+#elif defined(STM32F7)
+#define SPIDEV_COUNT 4
+#elif defined(STM32H5) || defined(STM32C5) || defined(STM32H7) || defined(STM32N6)
+#define SPIDEV_COUNT 6
+#else
+#define SPIDEV_COUNT 4
+#endif
+
+// Work around different check routines in the libraries for different MCU types
+#if defined(STM32H5) || defined(STM32C5) || defined(STM32H7) || defined(STM32N6)
+#define CHECK_SPI_RX_DATA_AVAILABLE(instance) LL_SPI_IsActiveFlag_RXWNE(instance)
+#define SPI_RX_DATA_REGISTER(base) ((base)->RXDR)
+#else
+#define CHECK_SPI_RX_DATA_AVAILABLE(instance) LL_SPI_IsActiveFlag_RXNE(instance)
+#define SPI_RX_DATA_REGISTER(base) ((base)->DR)
+#endif
+
+#if defined(STM32F4) || defined(STM32G4)
+#define MAX_SPI_PIN_SEL 2
+#elif defined(STM32F7)
+#define MAX_SPI_PIN_SEL 4
+#elif defined(STM32H5) || defined(STM32C5)
+#define MAX_SPI_PIN_SEL 5
+#elif defined(STM32H7) || defined(STM32N6)
+#define MAX_SPI_PIN_SEL 5
+#else
+#error Unknown MCU family
+#endif
+
+#if defined(STM32F4) || defined(STM32F7)
+#define USE_TX_IRQ_HANDLER
+#endif
+
+#if defined(STM32H7)
+#define UART_TX_BUFFER_ATTRIBUTE DMA_RAM /* D2 SRAM */
+#define UART_RX_BUFFER_ATTRIBUTE DMA_RAM /* D2 SRAM */
+#elif defined(STM32N6)
+#define UART_TX_BUFFER_ATTRIBUTE DMA_RAM
+#define UART_RX_BUFFER_ATTRIBUTE DMA_RAM
+#elif defined(STM32H5) || defined(STM32C5)
+#define UART_TX_BUFFER_ATTRIBUTE /* EMPTY */
+#define UART_RX_BUFFER_ATTRIBUTE /* EMPTY */
+#elif defined(STM32G4)
+#define UART_TX_BUFFER_ATTRIBUTE DMA_RAM_W /* SRAM MPU NOT_BUFFERABLE */
+#define UART_RX_BUFFER_ATTRIBUTE DMA_RAM_R /* SRAM MPU NOT CACHABLE */
+#elif defined(STM32F7)
+#define UART_TX_BUFFER_ATTRIBUTE FAST_DATA_ZERO_INIT /* DTCM RAM */
+#define UART_RX_BUFFER_ATTRIBUTE FAST_DATA_ZERO_INIT /* DTCM RAM */
+#elif defined(STM32F4)
+#define UART_TX_BUFFER_ATTRIBUTE /* EMPTY */
+#define UART_RX_BUFFER_ATTRIBUTE /* EMPTY */
+#endif
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+ // pin AF mode is configured for each pin individually
+#define UART_TRAIT_AF_PIN 1
+#elif defined(STM32F4)
+// all pins on given uart use same AF
+#define UART_TRAIT_AF_PORT 1
+#else
+#error Unknown STM MCU when defining UART_TRAIT_x
+#endif
+
+#define PLATFORM_TRAIT_RCC 1
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+#define UART_TRAIT_PINSWAP 1
+#endif
+
+#define UART_TRAIT_BIDIR_PP_PREPEND 1
+
+#if defined(STM32F4)
+#define UARTHARDWARE_MAX_PINS 4
+#elif defined(STM32F7)
+#define UARTHARDWARE_MAX_PINS 4
+#elif defined(STM32H7)
+#define UARTHARDWARE_MAX_PINS 6
+#elif defined(STM32G4)
+#define UARTHARDWARE_MAX_PINS 3
+#elif defined(STM32H5) || defined(STM32C5)
+#define UARTHARDWARE_MAX_PINS 5
+#elif defined(STM32N6)
+#define UARTHARDWARE_MAX_PINS 5
+#endif
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32N6) || defined(STM32C5)
+#define UART_REG_RXD(base) (((USART_TypeDef *)(base))->RDR)
+#define UART_REG_TXD(base) (((USART_TypeDef *)(base))->TDR)
+#elif defined(STM32F4)
+#define UART_REG_RXD(base) (((USART_TypeDef *)(base))->DR)
+#define UART_REG_TXD(base) (((USART_TypeDef *)(base))->DR)
+#endif
+
+
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+#define DMA_TRAIT_CHANNEL 1
+#endif
+
+#define SERIAL_TRAIT_PIN_CONFIG 1
+#define USB_DP_PIN PA12
+
+#if defined(STM32F7) || defined(STM32H7) || defined(STM32H5) || defined(STM32G4) || defined(STM32N6) || defined(STM32C5)
+#define I2C_TRAIT_STATE 1
+#endif
+
+#if defined(USE_HAL_DRIVER)
+
+#if defined(HAL_SPI_MODULE_ENABLED)
+#define SPI_TRAIT_HANDLE 1
+#endif
+
+#if defined(HAL_QSPI_MODULE_ENABLED)
+#define QSPI_TRAIT_HANDLE 1
+#endif
+#endif
+
+#if defined(STM32F4)
+#define I2CDEV_COUNT 3
+#else
+#define I2CDEV_COUNT 4
+#endif
+
+// F4 has a different SDIO driver that doesn't require early GPIO init
+#if defined(STM32F4) && !defined(ENABLE_SDIO_INIT)
+#define ENABLE_SDIO_INIT 0
+#endif
+
+// F4 and F7 SDIO drivers use external DMA channel allocation via dma_reqmap;
+// H5/H7/N6 SDMMC peripherals use internal DMA and do not need allocation.
+#if (defined(STM32F4) || defined(STM32F7)) && !defined(ENABLE_SDIO_EXTERNAL_DMA)
+#define ENABLE_SDIO_EXTERNAL_DMA 1
+#endif
+
+// QUAD SPI
+#if defined(STM32H7) || defined(STM32N6)
+#define MAX_QUADSPI_PIN_SEL 3
+#endif
+#if defined(STM32G4)
+#define MAX_QUADSPI_PIN_SEL 4
+#endif
+
+// F4 has non-8MHz boards
+// G4 for Betaflight allow 8, 16, 24, 26 or 27MHz oscillator
+#if defined(STM32F4) || defined(STM32G4)
+#define PLATFORM_TRAIT_CONFIG_HSE 1
+#endif
+
+#if defined(STM32G4)
+#define MCO_SOURCE_COUNT   8
+#define MCO_DIVIDER_COUNT  5
+#endif
+
+#if defined(STM32H7) || defined(STM32G4) || defined(STM32H5) || defined(STM32C5) || defined(STM32N6)
+#define DMA_CHANREQ_STRING "Request"
+
+#if defined(STM32C5)
+// STM32C5 has no internal VBAT/4 channel. The shared adc_impl table
+// has a placeholder slot pointing at the VREFINT channel which would
+// otherwise duplicate the VREFINT entry, throw the DMA dest-buffer
+// offset off by one, and corrupt the VREFINT/TEMPSENSOR readings.
+#define ADC_INTERNAL_VBAT4_ENABLED 0
+#else
+#define ADC_INTERNAL_VBAT4_ENABLED 1
+#endif
+#endif
+
+#if defined(STM32F4) || defined(STM32F7) || defined(STM32H7)
+#define DMA_STCH_STRING    "Stream"
+#endif
+
+#define PLATFORM_TRAIT_ADC_DEVICE 1
+
+#if defined(STM32F4) || defined(STM32F7)
+#ifndef ADC1_DMA_STREAM
+#define ADC1_DMA_STREAM DMA2_Stream4
+// ST0 or ST4
+#endif
+
+#ifndef ADC2_DMA_STREAM
+#define ADC2_DMA_STREAM DMA2_Stream3
+// ST2 or ST3
+#endif
+
+#ifndef ADC3_DMA_STREAM
+#define ADC3_DMA_STREAM DMA2_Stream0
+// ST0 or ST1
+#endif
+#endif
+
+#ifdef USE_ITCM_RAM
+#if defined(ITCM_RAM_OPTIMISATION) && !defined(DEBUG)
+#define FAST_CODE                   __attribute__((section(".tcm_code"))) __attribute__((optimize(ITCM_RAM_OPTIMISATION)))
+#else
+#define FAST_CODE                   __attribute__((section(".tcm_code")))
+#endif
+// If a particular target is short of ITCM RAM, defining FAST_CODE_PREF in the target.h file will
+// cause functions decorated FAST_CODE_PREF to *not* go into ITCM RAM but if FAST_CODE_PREF is not
+// defined for the target, FAST_CODE_PREF will become an alias to FAST_CODE (in the common post
+// header file), and functions decorated with FAST_CODE_PREF *will* go into ITCM RAM.
+
+#define FAST_CODE_NOINLINE          NOINLINE
+#endif // USE_ITCM_RAM
+
+// noting this is not used anywhere in the codebase at the moment
+#ifdef USE_CCM_CODE
+#define CCM_CODE                    __attribute__((section(".ccm_code")))
+#endif
+
+#ifdef USE_FAST_DATA
+#define FAST_DATA_ZERO_INIT         __attribute__ ((section(".fastram_bss"), aligned(4)))
+#define FAST_DATA                   __attribute__ ((section(".fastram_data"), aligned(4)))
+#endif // USE_FAST_DATA
+
+#if defined(USE_EXST) && !defined(RAMBASED)
+#define USE_FLASH_BOOT_LOADER
+#endif
+
+#if defined(USE_FLASH_MEMORY_MAPPED)
+#if !defined(USE_RAM_CODE)
+#define USE_RAM_CODE
+#endif
+
+#define MMFLASH_CODE RAM_CODE
+#define MMFLASH_CODE_NOINLINE RAM_CODE NOINLINE
+
+#define MMFLASH_DATA FAST_DATA
+#define MMFLASH_DATA_ZERO_INIT FAST_DATA_ZERO_INIT
+#endif
+
+#ifdef USE_RAM_CODE
+// RAM_CODE for methods that need to be in RAM, but don't need to be in the fastest type of memory.
+// Note: if code is marked as RAM_CODE it *MUST* be in RAM, there is no alternative unlike functions marked with FAST_CODE/CCM_CODE
+#define RAM_CODE                   __attribute__((section(".ram_code")))
+#endif
+
+// NVIC priority utility macros
+#if defined(USE_HAL_DRIVER)
+#define NVIC_PRIORITY_GROUPING NVIC_PRIORITYGROUP_2
+#define NVIC_BUILD_PRIORITY(base,sub) (((((base)<<(4-(7-(NVIC_PRIORITY_GROUPING))))|((sub)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING)))))<<4)&0xf0)
+#define NVIC_PRIORITY_BASE(prio) (((prio)>>(4-(7-(NVIC_PRIORITY_GROUPING))))>>4)
+#define NVIC_PRIORITY_SUB(prio) (((prio)>>4)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING))))
+#else
+#define NVIC_PRIORITY_GROUPING NVIC_PriorityGroup_2
+#define NVIC_BUILD_PRIORITY(base,sub) (((((base)<<(4-(7-(NVIC_PRIORITY_GROUPING>>8))))|((sub)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING>>8)))))<<4)&0xf0)
+#define NVIC_PRIORITY_BASE(prio) (((prio)>>(4-(7-(NVIC_PRIORITY_GROUPING>>8))))>>4)
+#define NVIC_PRIORITY_SUB(prio) (((prio)>>4)&(0x0f>>(7-(NVIC_PRIORITY_GROUPING>>8))))
+#endif
+

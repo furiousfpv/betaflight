@@ -1,24 +1,37 @@
 /*
- * This file is part of Cleanflight.
+ * This file is part of Cleanflight and Betaflight.
  *
- * Cleanflight is free software: you can redistribute it and/or modify
- * it under the terms of the GNU General Public License as published by
- * the Free Software Foundation, either version 3 of the License, or
- * (at your option) any later version.
+ * Cleanflight and Betaflight are free software. You can redistribute
+ * this software and/or modify this software under the terms of the
+ * GNU General Public License as published by the Free Software
+ * Foundation, either version 3 of the License, or (at your option)
+ * any later version.
  *
- * Cleanflight is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU General Public License for more details.
+ * Cleanflight and Betaflight are distributed in the hope that they
+ * will be useful, but WITHOUT ANY WARRANTY; without even the implied
+ * warranty of MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
+ * See the GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with Cleanflight.  If not, see <http://www.gnu.org/licenses/>.
+ * along with this software.
+ *
+ * If not, see <http://www.gnu.org/licenses/>.
  */
 
 #include <string.h>
 #include <stdint.h>
 
+#include "platform.h"
+
 #include "streambuf.h"
+#include "common/maths.h"
+
+sbuf_t *sbufInit(sbuf_t *sbuf, uint8_t *ptr, uint8_t *end)
+{
+    sbuf->ptr = ptr;
+    sbuf->end = end;
+    return sbuf;
+}
 
 void sbufWriteU8(sbuf_t *dst, uint8_t val)
 {
@@ -53,6 +66,11 @@ void sbufWriteU32BigEndian(sbuf_t *dst, uint32_t val)
     sbufWriteU8(dst, (uint8_t)val);
 }
 
+void sbufFill(sbuf_t *dst, uint8_t data, int len)
+{
+    memset(dst->ptr, data, len);
+    dst->ptr += len;
+}
 
 void sbufWriteData(sbuf_t *dst, const void *data, int len)
 {
@@ -62,15 +80,33 @@ void sbufWriteData(sbuf_t *dst, const void *data, int len)
 
 void sbufWriteString(sbuf_t *dst, const char *string)
 {
-    sbufWriteData(dst, string, strlen(string) + 1); // include zero terminator
+    sbufWriteData(dst, string, strlen(string));
 }
 
-uint8_t sbufReadU8(sbuf_t *src)
+void sbufWritePString(sbuf_t *dst, const char *string)
 {
-    return *src->ptr++;
+    const int length = MIN((int)strlen(string), 255);
+    sbufWriteU8(dst, length);
+    sbufWriteData(dst, string, length);
 }
 
-uint16_t sbufReadU16(sbuf_t *src)
+void sbufWriteStringWithZeroTerminator(sbuf_t *dst, const char *string)
+{
+    sbufWriteData(dst, string, strlen(string) + 1);
+}
+
+// The readers are kept out-of-line: under LTO the end-bounds check would
+// otherwise be inlined at every one of the ~hundreds of call sites, bloating
+// flash on constrained targets. A single shared copy costs a call instead.
+NOINLINE uint8_t sbufReadU8(sbuf_t *src)
+{
+    if (src->ptr < src->end) {
+        return *src->ptr++;
+    }
+    return 0;
+}
+
+NOINLINE uint16_t sbufReadU16(sbuf_t *src)
 {
     uint16_t ret;
     ret = sbufReadU8(src);
@@ -78,7 +114,7 @@ uint16_t sbufReadU16(sbuf_t *src)
     return ret;
 }
 
-uint32_t sbufReadU32(sbuf_t *src)
+NOINLINE uint32_t sbufReadU32(sbuf_t *src)
 {
     uint32_t ret;
     ret = sbufReadU8(src);
@@ -88,9 +124,15 @@ uint32_t sbufReadU32(sbuf_t *src)
     return ret;
 }
 
-void sbufReadData(sbuf_t *src, void *data, int len)
+NOINLINE void sbufReadData(sbuf_t *src, void *data, int len)
 {
-    memcpy(data, src->ptr, len);
+    const int available = MAX((int)(src->end - src->ptr), 0);
+    const int toCopy = MIN(len, available);
+    memcpy(data, src->ptr, toCopy);
+    if (toCopy < len) {
+        memset((uint8_t *)data + toCopy, 0, len - toCopy);
+    }
+    src->ptr += toCopy;
 }
 
 // reader - return bytes remaining in buffer
@@ -115,7 +157,11 @@ const uint8_t* sbufConstPtr(const sbuf_t *buf)
 // writer - commit written data
 void sbufAdvance(sbuf_t *buf, int size)
 {
-    buf->ptr += size;
+    if (size > 0 && size > (int)(buf->end - buf->ptr)) {
+        buf->ptr = buf->end;
+    } else {
+        buf->ptr += size;
+    }
 }
 
 // modifies streambuf so that written data are prepared for reading
